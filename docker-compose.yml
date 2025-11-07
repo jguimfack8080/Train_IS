@@ -1,0 +1,127 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: train_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      # Standard-DB 'postgres' nutzen, um die automatische Erstellung von 'train_dw' durch das Image zu vermeiden
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  pgadmin:
+    image: dpage/pgadmin4:8.7
+    container_name: pgadmin
+    depends_on:
+      - postgres
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@local.test}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+    ports:
+      - "8081:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+  db-init:
+    image: postgres:16
+    container_name: db_init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    entrypoint: /bin/bash
+    command: -lc "psql -h postgres -U ${POSTGRES_USER:-postgres} -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/01_init.sql"
+    restart: "no"
+
+  airflow-webserver:
+    build: ./airflow
+    container_name: airflow_webserver
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-train_airflow_web_secret_key}
+      AIRFLOW__WEBSERVER__RBAC: "True"
+      AIRFLOW__CORE__DEFAULT_TIMEZONE: system
+      AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: Europe/Berlin
+      TZ: Europe/Berlin
+      # Datenbank (DWH) Verbindungsdaten
+      DATA_DB_HOST: postgres
+      DATA_DB_PORT: 5432
+      DATA_DB_NAME: train_dw
+      DATA_DB_USER: dw
+      DATA_DB_PASSWORD: dw
+      # Externe API-Credentials
+      DB_CLIENT_ID: ${DB_CLIENT_ID:-}
+      DB_API_KEY: ${DB_API_KEY:-}
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/include:/opt/airflow/include
+      - ./airflow/requirements.txt:/opt/airflow/requirements.txt
+    command: bash -lc "pip install -r /opt/airflow/requirements.txt && for i in {1..30}; do airflow db check && break || sleep 2; done; airflow db upgrade && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true && airflow dags unpause db_stations_import || true && airflow dags unpause open_meteo_forecast_import || true && airflow dags unpause open_meteo_archive_import || true && airflow dags unpause weather_transform_dwh || true && airflow webserver"
+    ports:
+      - "8085:8080"
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "airflow db check"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  airflow-scheduler:
+    build: ./airflow
+    container_name: airflow_scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-train_airflow_web_secret_key}
+      AIRFLOW__CORE__DEFAULT_TIMEZONE: system
+      AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: Europe/Berlin
+      TZ: Europe/Berlin
+      # Datenbank (DWH) Verbindungsdaten
+      DATA_DB_HOST: postgres
+      DATA_DB_PORT: 5432
+      DATA_DB_NAME: train_dw
+      DATA_DB_USER: dw
+      DATA_DB_PASSWORD: dw
+      # Externe API-Credentials
+      DB_CLIENT_ID: ${DB_CLIENT_ID:-}
+      DB_API_KEY: ${DB_API_KEY:-}
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/include:/opt/airflow/include
+      - ./airflow/requirements.txt:/opt/airflow/requirements.txt
+    command: bash -lc "pip install -r /opt/airflow/requirements.txt && for i in {1..30}; do airflow db check && break || sleep 2; done; airflow db upgrade && airflow dags unpause db_stations_import || true && airflow dags unpause open_meteo_forecast_import || true && airflow dags unpause open_meteo_archive_import || true && airflow dags unpause weather_transform_dwh || true && airflow scheduler"
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "airflow db check"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  pgdata:
+  pgadmin_data:

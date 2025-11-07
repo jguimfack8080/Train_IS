@@ -1,0 +1,551 @@
+# Informationssystem zur Prognose von Bahnbeeinträchtigungen in Bremen
+
+Autor: Jordan Guimfack Jeuna
+Hochschule Bremerhaven – Studiengang Informationssysteme
+Betreuer: Prof. Dr. Jens Hündling
+
+**Kurzüberblick**
+- Containerisierte Datenpipeline (Docker Compose) für Ingestion, Transformation und Analyse von Bahn‑ und Wetterdaten.
+- Orchestrierung mit Apache Airflow; Speicherung und Modellierung in PostgreSQL; Observability über das Schema `metadata`.
+- Schichtenarchitektur: `stg` (flüchtig, Rohdaten) → `psa` (persistente Kopie) → `dwh` (Modellierung und Konsum über Views).
+- Stündliche Vertikalisierung der Open‑Meteo‑Payloads: 1 JSON‑Zeile pro Station × Stunde; Konsum über lesbare Views mit automatischer Duplikateliminierung.
+
+**Inhalt**
+- Architektur und Designentscheidungen
+- Start und Umgebungsvariablen
+- Verbindungen und Ports
+- Schemata und Tabellen
+- DAGs (DB‑Import, Open‑Meteo‑Forecast, Open‑Meteo‑Archive)
+- Python‑Utilities (API‑Clients, DB‑Funktionen)
+- Logik der Vertikalisierung und Views
+- Checks und Troubleshooting
+- Bekannte Grenzen und Verbesserungen
+
+---
+
+## Architektur und Designentscheidungen
+
+### Datenschichten
+Das System implementiert eine strikte Drei‑Schichten‑Architektur zur Trennung von Verantwortlichkeiten:
+
+- **`stg` (Staging)**: Temporäre Aufnahme von Rohdaten im JSON‑Format
+  - Zweck: Schnelle Ingestion ohne Blockierung durch Transformationen
+  - Lebensdauer: Flüchtig; Bereinigung unmittelbar nach erfolgreicher Kopie nach PSA
+  - Begründung: Entkopplung von API‑Calls und Persistierung; Fehler in der Persistierung beeinträchtigen nicht die Ingestion
+
+- **`psa` (Persistent Staging Area)**: Unveränderliche, dauerhafte Kopie aller Rohdaten
+  - Zweck: Audit‑Trail und Grundlage für Reprocessing
+  - Eigenschaften: Keine Transformationen, exakte 1:1‑Kopie aus STG
+  - Begründung: Ermöglicht vollständiges Replay bei Modellierungsfehlern ohne erneute API‑Calls; erfüllt Compliance‑Anforderungen
+
+- **`dwh` (Data Warehouse)**: Modellierte, konsumierbare Datenstrukturen
+  - Zweck: Analytische Speicherung und deklarative Views für Endnutzer
+  - Eigenschaften: Vertikalisierte JSON‑Daten, dimensionale Verknüpfungen, automatische Duplikateliminierung
+  - Begründung: Trennung von Rohdatenspeicherung und Konsumschicht; Views ermöglichen versionierbare, transparente Transformationen
+
+- **`metadata`**: Vollständige Nachverfolgbarkeit aller Prozesse
+  - Tabellen: `api_call_log` (API‑Requests), `process_log` (Pipeline‑Schritte)
+  - Begründung: Observability, Debugging, Audit‑Trail, Performance‑Monitoring
+
+### JSON‑Vertikalisierung: Von Arrays zu Zeilen
+
+**Problem**: Open‑Meteo liefert Wetterdaten als parallele Arrays (`hourly.time`, `hourly.temperature_2m`, etc.), die schwer abfragbar und nicht normalisiert sind.
+
+**Lösung**: Transformation in zeilenorientiertes Format
+- Jeder Index `i` in `hourly.time` wird zu einer eigenständigen Zeile
+- Alle korrespondierenden Messwerte am Index `i` werden in derselben Zeile gespeichert
+- Speicherung als JSONB in `dwh.weather_forecast_vertical_raw` und `dwh.weather_history_vertical_raw`
+
+**Begründung**:
+- Standardisiertes, relationsfähiges Format
+- Einfache SQL‑Abfragen auf Stundenbasis
+- Flexibilität bei Schemaänderungen (neue Messungen erfordern keine DDL‑Änderungen)
+- Balance zwischen Performance und Flexibilität
+
+### DWH‑Views mit automatischer Duplikateliminierung
+
+**Design**: Views (`dwh.v_weather_forecast_hourly`, `dwh.v_weather_history_hourly`) extrahieren strukturierte Daten aus JSONB und eliminieren automatisch Duplikate.
+
+**Duplikateliminierung**: `DISTINCT ON (station_id, time)` mit `ORDER BY batch_id DESC`
+- Pro Station und Zeitpunkt wird nur die Zeile mit dem höchsten (neuesten) `batch_id` zurückgegeben
+- Garantiert duplikatfreie Ergebnisse für Konsumenten
+- Alle historischen Batches bleiben in den Rohdatentabellen verfügbar
+
+**Begründung der Architekturentscheidung**:
+1. **Maximale Flexibilität**: Historische Daten bleiben vollständig erhalten für Audits und Analysen
+2. **Einfache Wartung**: Duplikateliminierung ist deklarativ in der View‑Definition; keine komplexe Cleanup‑Logik
+3. **Transparenz**: Konsumenten sehen automatisch nur aktuelle Daten; keine manuelle Filterung erforderlich
+4. **Versionierung**: Views können einfach angepasst werden ohne Änderungen an Rohdaten
+5. **Entkopplung**: Ingestion und Konsum sind vollständig getrennt
+
+**Alternative Ansätze (bewusst verworfen)**:
+- `UNIQUE` Constraint auf `(station_id, time)`: Würde Reprocessing blockieren; historische Batches gingen verloren
+- `ON CONFLICT DO UPDATE`: Überschreibt alte Daten; Audit‑Trail unvollständig
+- Cleanup‑Jobs: Zusätzliche Komplexität; Race‑Conditions möglich
+
+**Trade‑off**: Potenzielle Performance‑Einbußen bei sehr großen Datenmengen
+**Gegenmaßnahmen**: Indizes auf `(payload->>'station_id', payload->>'time', batch_id DESC)`; Option für materialisierte Views
+
+### Nachverfolgbarkeit und Idempotenz
+
+**Batch‑ID‑System**: Jeder Pipeline‑Lauf erhält eine eindeutige `batch_id` (Format: `source_YYYYMMDDHHmmss_uuid`)
+- Propagierung durch alle Schichten: STG → PSA → DWH
+- Verknüpfung mit `metadata.process_log` für vollständige Rückverfolgbarkeit
+
+**Idempotenz‑Mechanismus**: `utils.db.is_batch_processed(process_name, batch_id)`
+- Prüfung vor jeder Transformation: Wurde dieser Batch bereits erfolgreich verarbeitet?
+- Bereits verarbeitete Batches: Status `skipped` in `metadata.process_log`; kein erneutes Einfügen
+- Begründung: Wiederholte Airflow‑Retries oder manuelle Re‑Runs führen nicht zu Datenduplikaten
+
+**Warum auf Transformationsebene, nicht auf Ingestion‑Ebene?**
+- Ingestion soll so schnell wie möglich sein; Idempotenzprüfungen würden sie verlangsamen
+- PSA enthält bewusst alle Batches (auch Duplikate aus API‑Retries) für vollständigen Audit‑Trail
+- DWH‑Transformation ist der richtige Ort für Deduplication‑Logik
+
+### ELT‑Ansatz mit JSONB
+
+**Entscheidung**: Rohdaten als JSONB speichern; Extraktion über deklarative Views
+
+**Vorteile**:
+- **Flexibilität**: Neue Messungen von Open‑Meteo erfordern keine Schemaänderungen
+- **Schnelle Ingestion**: Keine Transformationen während des API‑Calls
+- **Versionierung**: View‑Definitionen sind versionierbar in Git; Änderungen sind nachvollziehbar
+- **Transparenz**: Transformation ist deklarativ in SQL; keine versteckte Logik
+
+**Nachteile (bewusst akzeptiert)**:
+- Geringfügig langsamere Abfragen als bei vollständig normalisierten Tabellen
+- View‑Performance kann bei sehr großen Datenmengen leiden
+
+**Gegenmaßnahmen**:
+- Indizes auf JSONB‑Attributen (`payload->>'time'`, `payload->>'station_id'`)
+- Option für materialisierte Views bei Performance‑Problemen
+
+### Transformation innerhalb der Import‑DAGs
+
+**Entscheidung**: Kein separater Transform‑DAG; Vertikalisierung erfolgt am Ende der Import‑DAGs (`transform_forecast_to_dwh`, `transform_history_to_dwh`)
+
+**Begründung**:
+- **Geringere Latenz**: Daten sind unmittelbar nach Ingestion konsumierbar
+- **Einfachere Koordination**: Keine DAG‑Abhängigkeiten oder Sensoren erforderlich
+- **Klarer Prozessfluss**: Linearer Ablauf von API‑Call bis DWH‑Speicherung
+- **Atomarität**: Ein Lauf = ein Batch von der Ingestion bis zur Transformation
+
+**Trade‑off**: Geringere Entkopplung zwischen Ingestion und Transformation
+**Gegenmaßnahmen**: Idempotenz‑Mechanismus und umfassendes Prozess‑Logging garantieren Datenintegrität
+
+**Alternative (bewusst verworfen)**: Separater Transform‑DAG mit Sensoren
+- Würde zusätzliche Latenz einführen
+- Komplexere Fehlerbehandlung bei Sensor‑Timeouts
+- Höherer Koordinationsaufwand
+
+### Batching und API‑Laststeuerung
+
+**Forecast**: Koordinaten werden in Batches von maximal 200 Stationen gruppiert
+- Begründung: URL‑Längenbeschränkungen; Lastverteilung auf Open‑Meteo‑API
+- Effekt: Stabile Request‑Größen; bessere Fehler‑Isolation (ein fehlerhafter Batch blockiert nicht alle Stationen)
+
+**Archive**: Startfenster über `ARCHIVE_START_DATE`; Enddatum automatisch J‑2
+- Begründung: Kontrollierte historische Verarbeitung ohne Überlastung
+- Flexibilität: Startdatum konfigurierbar für Backfills/Tests; Enddatum wird automatisch als J‑2 (heute minus zwei Tage) gesetzt
+ - Fenster rollierend: Erstlauf verwendet `ARCHIVE_START_DATE` (z. B. `2025‑01‑01`); Folgeläufe setzen `start_date = letztes end_date` aus `metadata.api_call_log`, `end_date = heute‑2 Tage`
+
+### Scheduling und Catchup
+
+**Forecast**: `0 */6 * * *`, `catchup=false`
+- Läuft alle 6 Stunden (00:00/06:00/12:00/18:00) für zeitnahe Prognoseupdates
+
+**Archive**: `0 3 * * *`, `catchup=false`
+- Standardfenster J‑2 (Open‑Meteo aktualisiert Historie mit 1–2 Tagen Verzögerung)
+- Initial Load: Manuell mit `ARCHIVE_START_DATE` (Start); Enddatum ist immer „heute‑2 Tage“ (J‑2) und wird vom DAG berechnet; alternativ temporär `catchup=true`
+ - Hinweis: Fenster rollierend zwischen Läufen (siehe Abschnitt „Archive“ oben)
+
+---
+
+## Schnellstart
+
+- `.env` aus `.env.example` erstellen und Variablen setzen
+- Start: `docker compose up -d --build`
+- Airflow Web UI: `http://localhost:8085` (Login `admin` / `admin`)
+- pgAdmin: `http://localhost:8081` (Admin: `admin@local.test` / `admin`)
+
+---
+
+## Umgebungsvariablen (wichtigste)
+
+- **API DB**: `DB_CLIENT_ID`, `DB_API_KEY`
+- **Airflow**: `AIRFLOW_FERNET_KEY`, `AIRFLOW_WEBSERVER_SECRET_KEY` (identisch für Webserver/Scheduler)
+- **Datenbank**: `DATA_DB_HOST`, `DATA_DB_PORT`, `DATA_DB_NAME`, `DATA_DB_USER`, `DATA_DB_PASSWORD`
+- **Postgres (Container)**: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
+- **Open‑Meteo Archive**: `ARCHIVE_START_DATE`, `OPEN_METEO_ARCHIVE_HOURLY` (Enddatum J‑2 automatisch vom DAG)
+  - Hinweis: Erstlauf nutzt `ARCHIVE_START_DATE`; Folgeläufe setzen `start_date = letztes end_date` aus dem API‑Log
+
+---
+
+## PostgreSQL‑Verbindungen
+
+- **Lokaler Client**: `psql -h localhost -p 5433 -U dw -d train_dw` (Credentials: `dw/dw`)
+- **pgAdmin**: Server anlegen mit `Host=postgres`, `Port=5432`, `User/Pass=postgres/postgres` oder `dw/dw`
+
+---
+
+## Schemata und Tabellen (wichtigste)
+
+**Metadata**:
+- `metadata.api_call_log`: Vollständige API‑Request‑Historie
+- `metadata.process_log`: Pipeline‑Schritte mit Start/Ende/Status
+
+**Staging**:
+- `stg.db_stations_raw`, `stg.weather_forecast_raw`, `stg.weather_history_raw`
+
+**Persistent Staging Area**:
+- `psa.db_stations_raw`, `psa.weather_forecast_raw`, `psa.weather_history_raw`
+
+**Data Warehouse**:
+- `dwh.stations`: Dimensionstabelle für Bahnhöfe
+- `dwh.weather_forecast_vertical_raw`: Vertikalisierte Vorhersagedaten (JSONB)
+- `dwh.weather_history_vertical_raw`: Vertikalisierte historische Daten (JSONB)
+
+**Views**:
+- `dwh.v_stations`: Angereicherte Stationsdimension
+- `dwh.v_weather_forecast_hourly`: Stündliche Vorhersagen (duplikatfrei)
+- `dwh.v_weather_history_hourly`: Stündliche historische Daten (duplikatfrei)
+
+---
+
+## DAGs (Airflow)
+
+### `db_stations_import`
+**Datei**: `airflow/dags/db_stations_dag.py`
+
+**Aufgabe**: Alle Bahnhöfe via Deutsche Bahn Station Data v2 API laden
+
+**Ablauf**:
+1. Paginierte Schleife: `offset += limit` bis `total` erreicht
+2. Speicherung in `stg.db_stations_raw`
+3. Kopie nach `psa.db_stations_raw`
+4. Bereinigung von `stg`
+
+**Logging**:
+- `metadata.api_call_log`: Quelle, Endpoint, Parameter, HTTP‑Status, Antwortzeit, Ergebnisanzahl
+- `metadata.process_log`: Prozess‑Start, Ende, Status, Batch‑ID
+
+**Fehlertoleranz**: Airflow‑Retries bei `4xx/5xx` HTTP‑Fehlern
+
+### `open_meteo_forecast_import`
+**Datei**: `airflow/dags/open_meteo_dag.py`
+
+**Aufgabe**: Wettervorhersagen für Stationskoordinaten in Bremen ingestieren
+
+**Stundenparameter**: `temperature_2m`, `relative_humidity_2m`, `dew_point_2m`, `apparent_temperature`, `precipitation_probability`, `precipitation`, `rain`, `showers`, `snowfall`, `snow_depth`, `weather_code`, `pressure_msl`, `surface_pressure`, `cloud_cover`, `cloud_cover_low`, `cloud_cover_mid`, `cloud_cover_high`, `visibility`, `wind_speed_10m`, `evapotranspiration`, `vapour_pressure_deficit`
+
+**Batching**: Koordinaten in Pakete von maximal 200 Stationen zur URL‑Längen‑ und Lastbegrenzung
+
+**Tasks**:
+1. `fetch_open_meteo_weather`: API‑Call und Speicherung in STG
+2. `copy_weather_to_psa`: Kopie nach PSA
+3. `purge_stg_weather`: Bereinigung STG
+4. `transform_forecast_to_dwh`: Vertikalisierung und Speicherung in DWH mit Idempotenzprüfung
+
+**Besonderheit**: Transformation ist integriert; bereits verarbeitete Batches werden als `skipped` protokolliert
+
+### `open_meteo_archive_import`
+**Datei**: `airflow/dags/open_meteo_archive_dag.py`
+
+**Aufgabe**: Historische Open‑Meteo‑Daten über konfigurierbares Zeitfenster laden
+
+**Parameter**: `ARCHIVE_START_DATE`, `OPEN_METEO_ARCHIVE_HOURLY` (Ende automatisch J‑2)
+
+**Tasks**:
+1. `fetch_and_store_weather_archive`: API‑Call und Speicherung in STG
+2. `copy_weather_archive_to_psa`: Kopie nach PSA
+3. `purge_stg_weather_archive`: Bereinigung STG
+4. `transform_history_to_dwh`: Vertikalisierung und Speicherung in DWH mit Idempotenzprüfung
+
+**Besonderheit**: Fenster rollierend
+- Erstlauf: `start_date = ARCHIVE_START_DATE` (z. B. `2025‑01‑01`), `end_date = heute‑2 Tage`
+- Folgeläufe: `start_date = letztes end_date` (aus `metadata.api_call_log`), `end_date = heute‑2 Tage`
+- Inklusive Fenster (Start = letztes End): Duplikate werden durch Views (`DISTINCT ON`) eliminiert; optional kann auf exklusiv (Start = letztes End + 1 Tag) umgestellt werden
+
+---
+
+## Python‑Utilities
+
+### `utils/api_client.py`
+**Funktionen**:
+- `fetch_db_stations_all`: Paginierte Schleife mit Zeitmessung; Rückgabe `(items, status, elapsed, meta)`
+- `fetch_open_meteo_forecast`: URL‑Bau mit gerundeten Koordinatenlisten; Timeout und JSON‑Parsing
+- `fetch_open_meteo_archive`: Analog zu Forecast mit `start_date`, `end_date` und `hourly`‑Parametern
+
+### `utils/db.py`
+**Verbindungen**: Parameter aus ENV; `get_connection()` zentralisiert `psycopg2.connect`
+
+**Basisfunktionen**:
+- `insert_json`: Fügt 1 Zeile pro JSON‑Element ein; unterstützt `batch_id`
+- `log_api_call`: Parameter als JSONB; HTTP‑Status, Antwortzeit
+- `log_process_start/end`: Prozess‑Lifecycle in `metadata.process_log`
+
+**Schicht‑Transfer**:
+- `copy_*` und `purge_*` für Stationen, Vorhersage, Archiv (STG ↔ PSA)
+
+**Batch‑Helfer**:
+- `_get_latest_batch_id`, `get_latest_forecast_batch_id`, `get_latest_history_batch_id`
+- `is_batch_processed`: Idempotenzprüfung für Transformationen
+ - `get_last_archive_end_date`: Liefert das letzte genutzte `end_date` für Archive aus `metadata.api_call_log`
+
+**DWH‑Vertikalisierung**:
+- `insert_forecast_verticalized_to_dwh`, `insert_history_verticalized_to_dwh`
+- **Station‑Mapping**: `_load_stations_for_mapping` + `_match_station_id` (Toleranz 1e‑4; Fallback auf nächsten Punkt nach euklidischer Distanz)
+- **Batch‑Insert**: `psycopg2.extras.execute_values` für Performance
+
+---
+
+## Logik der Vertikalisierung (DWH)
+
+### Prinzipien
+- **Ausrichtungsachse**: `hourly.time` dient als Zeilenindex
+- **Extraktion**: Am Index `i` wird für jede Messung `hourly.<measure>[i]` extrahiert; fehlende Werte → `NULL`
+- **Metadaten**: Jede Zeile enthält `psa_id`, `station_id`, `batch_id`, `latitude`, `longitude`
+
+### Forecast (`insert_forecast_verticalized_to_dwh`)
+**Messungen**: Temperatur, Luftfeuchte, Taupunkt, gefühlte Temperatur, Niederschlagswahrscheinlichkeit und ‑summe, Regen, Schauer, Schnee, Schneehöhe, Wettercode, Druck (Meeresspiegel und Oberfläche), Wolkenbedeckung (gesamt, niedrig, mittel, hoch), Sichtweite, Windgeschwindigkeit, Evapotranspiration, Dampfdruckdefizit
+
+**Robustheit**: Toleranz gegenüber teilweisen Payloads; fehlende Felder werden als `NULL` gespeichert
+
+### History (`insert_history_verticalized_to_dwh`)
+**Eingabe**: Liste von Objekten oder Einzelobjekt (automatische Erkennung)
+
+**Messungen**: Analog zu Forecast, ohne Niederschlagswahrscheinlichkeit, ohne Evapotranspiration und Dampfdruckdefizit
+
+### Views `dwh.v_weather_*_hourly`
+**Funktionen**:
+- Extraktion und Typkonvertierung von JSONB‑Feldern
+- Join mit `dwh.v_stations` für Stationsinformationen (Name, DS100, EVA‑Nummer)
+- **Automatische Duplikateliminierung**: `DISTINCT ON (station_id, time)` mit `ORDER BY batch_id DESC`
+
+**Garantie**: Konsumenten erhalten immer nur die aktuellste Messung pro Station und Zeitpunkt
+
+---
+
+## Nützliche Befehle
+
+### DAG‑Operationen
+- Forecast auslösen: `docker exec airflow_webserver bash -lc "airflow dags trigger open_meteo_forecast_import"`
+- Archive auslösen: `docker exec airflow_webserver bash -lc "airflow dags trigger open_meteo_archive_import"`
+- Task testen: `docker exec airflow_scheduler bash -lc "airflow tasks test db_stations_import fetch_and_store_stations YYYY-MM-DD"`
+
+### Datenzählungen
+- `SELECT COUNT(*) FROM psa.weather_forecast_raw;`
+- `SELECT COUNT(*) FROM dwh.weather_forecast_vertical_raw;`
+- `SELECT COUNT(*) FROM dwh.v_weather_forecast_hourly;`
+
+### Duplikate prüfen
+**Forecast**:
+```sql
+SELECT station_id, time, COUNT(*) as nb_doublons
+FROM dwh.v_weather_forecast_hourly
+GROUP BY station_id, time
+HAVING COUNT(*) > 1;
+```
+
+**History**:
+```sql
+SELECT station_id, time, COUNT(*) as nb_doublons
+FROM dwh.v_weather_history_hourly
+GROUP BY station_id, time
+HAVING COUNT(*) > 1;
+```
+
+**Erwartetes Ergebnis**: 0 Zeilen (Views eliminieren automatisch Duplikate)
+
+### Datenabfragen
+- Vorhersagen: `SELECT time, temperature_2m, precipitation FROM dwh.v_weather_forecast_hourly ORDER BY time ASC LIMIT 10;`
+- Stationen: `SELECT station_id, name, latitude, longitude FROM dwh.v_stations ORDER BY created_at DESC LIMIT 10;`
+
+---
+
+## Troubleshooting
+
+### Airflow 403‑Fehler
+**Problem**: Webserver zeigt 403‑Fehler in Logs
+
+**Lösung**: `AIRFLOW__WEBSERVER__SECRET_KEY` für Webserver und Scheduler identisch setzen
+
+### API 401/403‑Fehler
+**Problem**: Deutsche Bahn API antwortet mit Authentifizierungsfehler
+
+**Lösung**: `DB_CLIENT_ID` und `DB_API_KEY` prüfen; API‑Quotas überprüfen
+
+### Datenbank nicht bereit
+**Problem**: Airflow kann keine Verbindung zur Datenbank herstellen
+
+**Lösung**: Healthcheck des `postgres`‑Dienstes abwarten; `db-init` ist idempotent
+
+### Duplikate in Views
+**Problem**: Views zeigen doppelte Einträge für `(station_id, time)`
+
+**Diagnose**: View‑Definition prüfen; `DISTINCT ON` muss korrekt implementiert sein
+
+**Hinweis**: Bei korrekter Implementation sollten niemals Duplikate auftreten
+
+---
+
+## Grenzen und Verbesserungen
+
+### DWH‑Duplikateliminierung
+**Aktueller Stand**: View‑basierte Lösung mit `DISTINCT ON`
+
+**Vorteile**:
+- Maximale Flexibilität; alle historischen Batches bleiben verfügbar
+- Einfache Wartung und Versionierung
+
+**Nachteile**:
+- Potenzielle Performance‑Einbußen bei sehr großen Datenmengen
+
+**Verbesserungsoptionen**:
+- Composite Index auf `(payload->>'station_id', payload->>'time', batch_id DESC)`
+- Materialisierte Views bei Performance‑Problemen
+- Partitionierung der Rohdatentabellen nach Zeitfenster
+
+**Alternative Ansätze** (für zukünftige Iterationen):
+- `ON CONFLICT DO NOTHING` in Rohdatentabellen (verliert historische Batches)
+- Periodische Cleanup‑Jobs (zusätzliche Komplexität)
+
+### Performance
+**Empfohlene Optimierungen**:
+- Index auf `payload->>'time'` (ISO‑Zeitstempel sind lexikographisch sortierbar)
+- Index auf `payload->>'station_id'`
+- Materialisierte Views für `v_weather_*_hourly` bei hoher Volumetrie
+- Regelmäßige `VACUUM ANALYZE` auf JSONB‑Tabellen
+
+### Datenqualität
+**Erweiterungsmöglichkeiten**:
+- Python‑Validierung: Konsistenz aller `hourly.*`‑Arraylängen prüfen
+- Anomalieerkennung: Unrealistische Messwerte loggen
+- Data Quality Checks als eigene Airflow‑Tasks
+
+### Funktionserweiterungen
+**Zukünftige Features**:
+- Weitere Open‑Meteo‑Messungen (Windrichtung, Böen, UV‑Index)
+- ML‑DAG zur Vorhersage von Bahnbeeinträchtigungen aus Zeitreihen
+- Echtzeit‑Alerts bei extremen Wetterbedingungen
+- Grafana‑Dashboards für Monitoring
+
+---
+
+## Glossar
+
+- **STG**: Staging (Rohdaten, flüchtig)
+- **PSA**: Persistent Staging Area (unveränderliche Kopie für Audit und Reprocessing)
+- **DWH**: Data Warehouse (Modellierung und Konsum)
+- **Vertikalisierung**: Umwandlung von parallelen Arrays in zeilenorientiertes Format
+- **batch_id**: Eindeutige Laufkennung für vollständige Nachverfolgbarkeit
+- **DISTINCT ON**: PostgreSQL‑Feature zur Duplikateliminierung basierend auf bestimmten Spalten
+- **Idempotenz**: Eigenschaft, dass wiederholte Ausführungen dasselbe Ergebnis liefern
+- **ELT**: Extract, Load, Transform (Transformation nach der Speicherung)
+
+---
+
+## Architekturziele und Begründungen
+
+### Entkopplung durch Schichten
+**Ziel**: Saubere Trennung von Aufnahme, Audit und Modellierung
+
+**Effekte**:
+- Fehler lassen sich isoliert betrachten
+- Reprocessing benötigt nur PSA; Ingestion bleibt unberührt
+- Klare Verantwortlichkeiten pro Schicht
+- Unabhängige Evolution von Ingestion und Transformation
+
+### ELT mit JSONB
+**Entscheidung**: Rohdaten als JSONB speichern; Extraktion über deklarative Views
+
+**Vorteile**:
+- Flexibilität bei Schemaänderungen
+- Geringe Aufnahmezeit
+- Klare, versionierbare Extraktion
+- Volle API‑Response für Audits verfügbar
+
+**Trade‑off**: Etwas langsamere Abfragen als bei vollständiger Normalisierung
+
+**Gegenmaßnahmen**: Indizes, materialisierte Views
+
+### Duplikateliminierung auf View‑Ebene
+**Entscheidung**: `DISTINCT ON` in Konsum‑Views statt Constraints in Rohdaten
+
+**Vorteile**:
+- Alle historischen Daten bleiben für Audits verfügbar
+- Einfache Wartung (deklarativ in SQL)
+- Konsumenten sehen automatisch nur aktuelle Daten
+- Keine komplexe Cleanup‑Logik erforderlich
+
+**Trade‑off**: Performance bei sehr großen Datenmengen
+
+**Gegenmaßnahmen**: Indizes, materialisierte Views, Partitionierung
+
+### Transformation innerhalb der Import‑DAGs
+**Entscheidung**: Kein separater Transform‑DAG
+
+**Vorteile**:
+- Geringere Latenz
+- Einfachere Koordination
+- Klarer, linearer Prozessfluss
+- Atomarität: Ein Lauf = vollständiger Durchlauf
+
+**Trade‑off**: Geringere Entkopplung
+
+**Gegenmaßnahmen**: Idempotenz, umfassendes Logging
+
+### Idempotenz und Duplikatvermeidung
+**Mechanismus**: Prüfung vor Transformation; bereits verarbeitete Batches werden übersprungen
+
+**Vorteile**:
+- Airflow‑Retries sind sicher
+- Manuelle Re‑Runs führen nicht zu Datenduplikaten
+- Audits bleiben konsistent
+
+**Implementierung**: `is_batch_processed` in `utils.db`
+
+### Batching und API‑Laststeuerung
+**Forecast**: Koordinaten‑Batches (max. 200)
+
+**Vorteile**:
+- Respektiert URL‑Längenbeschränkungen
+- Lastverteilung auf API
+- Bessere Fehler‑Isolation
+
+**Archive**: Fenster rollierend
+- Erstlauf: `start_date = ARCHIVE_START_DATE` (z. B. `2025‑01‑01`), `end_date = heute‑2 Tage`
+- Folgeläufe: `start_date = letztes end_date` (aus `metadata.api_call_log`), `end_date = heute‑2 Tage`
+
+**Vorteile**:
+- Kontrollierte historische Verarbeitung
+- Flexibilität für Backfills
+
+### Scheduling und Catchup
+**Forecast**: `0 */6 * * *`, `catchup=false`
+- Stündlich im 6‑Stunden‑Raster (00/06/12/18) für laufende Vorhersageaktualisierung
+
+**Archive**: `0 3 * * *`, `catchup=false`
+- Standardfenster J‑2 zur Sicherung stabiler Daten
+ - Hinweis: Fenster rollierend (siehe Abschnitt „Batching und API‑Laststeuerung“)
+- Initial Load: explizites Startdatum über `ARCHIVE_START_DATE`; Enddatum ist immer „heute‑2 Tage“ (J‑2) oder temporär `catchup=true`
+
+---
+
+## Fehlerbehandlung, Observability und Betrieb
+
+### Logging und Nachverfolgbarkeit
+**Komponenten**:
+- `metadata.api_call_log`: Vollständige Parameter/Antwortmetrik pro API‑Abruf
+- `metadata.process_log`: Start/Ende, Status, Nachrichten, Batch‑ID
+
+**Nutzen**:
+- Vollständiger Audit‑Trail
+- Performance‑Monitoring
+- Debugging bei Fehlern
+- Compliance‑Anforderungen
+
+### Retries und Robustheit
+**Airflow‑Retries**: Automatisch bei transienten Fehlern
+
+**Idempotenz**: Schützt
