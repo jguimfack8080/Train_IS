@@ -96,6 +96,28 @@ CREATE TABLE IF NOT EXISTS stg.weather_history_raw (
   ingested_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Timetables (DB Fahrplan) Rohdaten pro Endpoint
+CREATE TABLE IF NOT EXISTS stg.timetables_plan_raw (
+  id BIGSERIAL PRIMARY KEY,
+  payload TEXT NOT NULL,
+  batch_id TEXT,
+  ingested_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS stg.timetables_fchg_raw (
+  id BIGSERIAL PRIMARY KEY,
+  payload TEXT NOT NULL,
+  batch_id TEXT,
+  ingested_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS stg.timetables_rchg_raw (
+  id BIGSERIAL PRIMARY KEY,
+  payload TEXT NOT NULL,
+  batch_id TEXT,
+  ingested_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- ===============================
 -- PSA‑Tabellen (persistente Rohdaten) mit expliziten Namen
 -- ===============================
@@ -116,6 +138,28 @@ CREATE TABLE IF NOT EXISTS psa.weather_forecast_raw (
 CREATE TABLE IF NOT EXISTS psa.weather_history_raw (
   id BIGSERIAL PRIMARY KEY,
   payload JSONB NOT NULL,
+  batch_id TEXT,
+  ingested_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Timetables (DB Fahrplan) persistente Rohdaten pro Endpoint
+CREATE TABLE IF NOT EXISTS psa.timetables_plan_raw (
+  id BIGSERIAL PRIMARY KEY,
+  payload TEXT NOT NULL,
+  batch_id TEXT,
+  ingested_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS psa.timetables_fchg_raw (
+  id BIGSERIAL PRIMARY KEY,
+  payload TEXT NOT NULL,
+  batch_id TEXT,
+  ingested_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS psa.timetables_rchg_raw (
+  id BIGSERIAL PRIMARY KEY,
+  payload TEXT NOT NULL,
   batch_id TEXT,
   ingested_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -328,6 +372,12 @@ CREATE INDEX IF NOT EXISTS idx_stg_weather_forecast_raw_batch_id ON stg.weather_
 CREATE INDEX IF NOT EXISTS idx_psa_weather_forecast_raw_batch_id ON psa.weather_forecast_raw(batch_id);
 CREATE INDEX IF NOT EXISTS idx_stg_weather_history_raw_batch_id ON stg.weather_history_raw(batch_id);
 CREATE INDEX IF NOT EXISTS idx_psa_weather_history_raw_batch_id ON psa.weather_history_raw(batch_id);
+CREATE INDEX IF NOT EXISTS idx_stg_timetables_plan_raw_batch_id ON stg.timetables_plan_raw(batch_id);
+CREATE INDEX IF NOT EXISTS idx_psa_timetables_plan_raw_batch_id ON psa.timetables_plan_raw(batch_id);
+CREATE INDEX IF NOT EXISTS idx_stg_timetables_fchg_raw_batch_id ON stg.timetables_fchg_raw(batch_id);
+CREATE INDEX IF NOT EXISTS idx_psa_timetables_fchg_raw_batch_id ON psa.timetables_fchg_raw(batch_id);
+CREATE INDEX IF NOT EXISTS idx_stg_timetables_rchg_raw_batch_id ON stg.timetables_rchg_raw(batch_id);
+CREATE INDEX IF NOT EXISTS idx_psa_timetables_rchg_raw_batch_id ON psa.timetables_rchg_raw(batch_id);
 CREATE INDEX IF NOT EXISTS idx_stg_weather_forecast_vertical_raw_batch_id ON stg.weather_forecast_vertical_raw(batch_id);
 CREATE INDEX IF NOT EXISTS idx_stg_weather_history_vertical_raw_batch_id ON stg.weather_history_vertical_raw(batch_id);
 CREATE INDEX IF NOT EXISTS idx_dwh_weather_forecast_vertical_raw_batch_id ON dwh.weather_forecast_vertical_raw(batch_id);

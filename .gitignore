@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+*$py.class
+fchg.xml
+plan.xml
+test_rchg.xml

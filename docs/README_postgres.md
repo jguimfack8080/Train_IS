@@ -15,7 +15,8 @@
 - `metadata.api_call_log` – Quelle, Endpoint, Params, Status-Code, Dauer, Anzahl.
 - `metadata.process_log` – Prozessstatus und Zeitstempel.
 - `stg.db_stations_raw` – Rohdaten der Deutsche Bahn Stationen.
-- `stg.weather_raw` – Rohdaten Open-Meteo.
+ - Open‑Meteo: `stg.weather_forecast_raw`, `stg.weather_history_raw` (JSONB)
+ - Timetables (XML, `payload TEXT`): `stg.timetables_plan_raw`, `stg.timetables_fchg_raw`, `stg.timetables_rchg_raw`
 - `psa.*` – persistente Kopien der Rohdaten.
 - `dwh.stations` – bereinigte Stationsdaten mit Koordinaten.
 - `dwh.weather_hourly` – aufbereitete Wetterzeitreihen.
