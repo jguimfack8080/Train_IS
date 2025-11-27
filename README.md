@@ -397,10 +397,11 @@ LIMIT 1;
 Zur besseren analytischen Nutzung der Fahrplandaten wurden folgende Änderungen implementiert:
 - FCHG‑Transformation (DWH): Die Ereignistabelle nutzt jetzt `eva_number` als Stationskennung und ist vollständig dokumentiert (Spaltenkommentare). Pro Meldung wird eine Zeile mit Zeit, Typ, Kategorie, Priorität, Verspätung und Bahnsteigwechsel erzeugt.
 - PLAN‑Transformation (DWH): Neuer Speicherpfad für planmäßige Abfahrts‑/Ankunftsereignisse in `dwh.timetables_plan_events` mit den Feldern Stationsname, Service‑ID, Zugnummer, Zuggattung, Typ, Richtung, Ereignistyp (`dp/ar`), Zeit, Gleis, `train_line_name`, Route und Batch. Der DAG `db_timetables_plan_import` führt die Transformation automatisch nach der Ingestion aus.
+ - RCHG‑Transformation (DWH): Jüngste Änderungen (`m/ar/dp`) werden in `dwh.timetables_rchg_events` gespeichert. Eine Zeile je Ereignis mit klaren Feldern (Ereignis‑ID, EVA, Station, Nachricht/Typ/Kategorie/Änderungstyp/Priorität, Gültigkeiten, alte/neue Zeit, Verspätung, Gleis/Wechsel, Route, `train_line_name`, Ereigniszeit, Batch) und garantierter Deduplikation über `event_hash`. Der DAG `db_timetables_rchg_import` führt die Transformation direkt nach der Ingestion aus.
 - Idempotenz und Logging: Beide Transformationen protokollieren `success/skipped` in `metadata.process_log` und verhindern doppelte Einfügungen.
 - Indizes: Selektive Indizes auf Station und Zeit wurden ergänzt, um typische Abfragen (Fenster, Bahnhof) zu beschleunigen.
 
-**Besonderheit**: Transformation ist integriert; bereits verarbeitete Batches werden als `skipped` protokolliert
+**Besonderheit**: Transformation ist integriert; bereits verarbeitete Batches werden als `skipped` protokolliert; für RCHG verhindert ein eindeutiger Ereignis‑Hash (`event_hash`) Duplikate.
 
 ### `open_meteo_archive_import`
 **Datei**: `airflow/dags/open_meteo_archive_dag.py`
