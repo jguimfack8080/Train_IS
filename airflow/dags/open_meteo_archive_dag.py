@@ -61,7 +61,11 @@ def _fetch_and_store_weather_archive(**context):
         log_api_call(
             source="open_meteo",
             endpoint="archive",
-            params={"reason": "no_station_coords", "start_date": start_date, "end_date": end_date},
+            params={
+                "reason": "no_station_coords",
+                "start_date": start_date,
+                "end_date": end_date,
+            },
             status_code=204,
             response_time_ms=0,
             result_count=0,
@@ -72,12 +76,21 @@ def _fetch_and_store_weather_archive(**context):
     start_ts = datetime.utcnow()
     batch_id = f"open_meteo_archive_{start_ts.strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
     process_id = log_process_start(process_name="open_meteo_archive_import", batch_id=batch_id)
+    # Appel API avec uniquement les coordonnées de Brême issues de get_bremen_station_coords()
     data, status_code, elapsed_ms = fetch_open_meteo_archive(coords, start_date, end_date, hourly_params)
 
     # Rohpayload in STG speichern
     insert_json(table="stg.weather_history_raw", payload=data, batch_id=batch_id)
 
     # API‑Call in METADATA protokollieren
+    # Calcul précis du nombre de résultats (liste directe ou sous clé 'results')
+    if isinstance(data, list):
+        result_count = len(data)
+    elif isinstance(data, dict) and isinstance(data.get("results"), list):
+        result_count = len(data.get("results"))
+    else:
+        result_count = 1
+
     log_api_call(
         source="open_meteo",
         endpoint="archive",
@@ -86,10 +99,13 @@ def _fetch_and_store_weather_archive(**context):
             "end_date": end_date,
             "hourly": hourly_params,
             "station_count": len(coords),
+            # Journaliser les coordonnées utilisées, comme pour le forecast
+            "latitude": ",".join([str(round(c[0], 6)) for c in coords]),
+            "longitude": ",".join([str(round(c[1], 6)) for c in coords]),
         },
         status_code=status_code,
         response_time_ms=elapsed_ms,
-        result_count=(len(data) if isinstance(data, list) else 1),
+        result_count=result_count,
         called_at=start_ts,
     )
     # XCom

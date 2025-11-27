@@ -29,13 +29,14 @@ Betreuer: Prof. Dr. Jens Hündling
 Das System implementiert eine strikte Drei‑Schichten‑Architektur zur Trennung von Verantwortlichkeiten:
 
 - **`stg` (Staging)**: Temporäre Aufnahme von Rohdaten im JSON‑Format
+  - Hinweis: JSON‑basierte APIs (Stationen, Wetter) werden als `JSONB` gespeichert; XML‑basierte Timetables‑APIs werden unverändert als `TEXT` gespeichert.
   - Zweck: Schnelle Ingestion ohne Blockierung durch Transformationen
   - Lebensdauer: Flüchtig; Bereinigung unmittelbar nach erfolgreicher Kopie nach PSA
   - Begründung: Entkopplung von API‑Calls und Persistierung; Fehler in der Persistierung beeinträchtigen nicht die Ingestion
 
 - **`psa` (Persistent Staging Area)**: Unveränderliche, dauerhafte Kopie aller Rohdaten
   - Zweck: Audit‑Trail und Grundlage für Reprocessing
-  - Eigenschaften: Keine Transformationen, exakte 1:1‑Kopie aus STG
+  - Eigenschaften: Keine Transformationen, exakte 1:1‑Kopie aus STG (JSON‑APIs als `JSONB`, Timetables‑XML als `TEXT`)
   - Begründung: Ermöglicht vollständiges Replay bei Modellierungsfehlern ohne erneute API‑Calls; erfüllt Compliance‑Anforderungen
 
 - **`dwh` (Data Warehouse)**: Modellierte, konsumierbare Datenstrukturen
@@ -104,7 +105,7 @@ Das System implementiert eine strikte Drei‑Schichten‑Architektur zur Trennun
 
 ### ELT‑Ansatz mit JSONB
 
-**Entscheidung**: Rohdaten als JSONB speichern; Extraktion über deklarative Views
+**Entscheidung**: Rohdaten von JSON‑basierten APIs als `JSONB` speichern; Extraktion über deklarative Views. XML‑basierte Timetables werden als `TEXT` unverändert gespeichert (keine JSON‑Umverpackung), um den API‑Return exakt zu erhalten.
 
 **Vorteile**:
 - **Flexibilität**: Neue Messungen von Open‑Meteo erfordern keine Schemaänderungen
@@ -113,8 +114,8 @@ Das System implementiert eine strikte Drei‑Schichten‑Architektur zur Trennun
 - **Transparenz**: Transformation ist deklarativ in SQL; keine versteckte Logik
 
 **Nachteile (bewusst akzeptiert)**:
-- Geringfügig langsamere Abfragen als bei vollständig normalisierten Tabellen
-- View‑Performance kann bei sehr großen Datenmengen leiden
+- Für JSONB: Geringfügig langsamere Abfragen als bei vollständig normalisierten Tabellen; View‑Performance kann bei sehr großen Datenmengen leiden
+- Für Timetables‑TEXT: Keine unmittelbare JSON‑Verarbeitung in SQL; eventuelle spätere Parsing‑Schritte erfolgen explizit in separaten Transformationen
 
 **Gegenmaßnahmen**:
 - Indizes auf JSONB‑Attributen (`payload->>'time'`, `payload->>'station_id'`)
@@ -179,6 +180,11 @@ Das System implementiert eine strikte Drei‑Schichten‑Architektur zur Trennun
 - **Open‑Meteo Archive**: `ARCHIVE_START_DATE`, `OPEN_METEO_ARCHIVE_HOURLY` (Enddatum J‑2 automatisch vom DAG)
   - Hinweis: Erstlauf nutzt `ARCHIVE_START_DATE`; Folgeläufe setzen `start_date = letztes end_date` aus dem API‑Log
 
+- **Timetables Filter (Bremen)**:
+  - `DB_TIMETABLES_FILTER_NAME_PREFIX` (Standard: `Brem%`)
+  - `DB_TIMETABLES_FILTER_DS100_PREFIX` (Standard: `HB%`)
+  - `DB_TIMETABLES_STATIONS_LIMIT` (optional: Limitierung der Anzahl EVA)
+
 ---
 
 ## PostgreSQL‑Verbindungen
@@ -196,9 +202,11 @@ Das System implementiert eine strikte Drei‑Schichten‑Architektur zur Trennun
 
 **Staging**:
 - `stg.db_stations_raw`, `stg.weather_forecast_raw`, `stg.weather_history_raw`
+ - Timetables (XML, `payload TEXT`): `stg.timetables_plan_raw`, `stg.timetables_fchg_raw`, `stg.timetables_rchg_raw`
 
 **Persistent Staging Area**:
 - `psa.db_stations_raw`, `psa.weather_forecast_raw`, `psa.weather_history_raw`
+ - Timetables (XML, `payload TEXT`): `psa.timetables_plan_raw`, `psa.timetables_fchg_raw`, `psa.timetables_rchg_raw`
 
 **Data Warehouse**:
 - `dwh.stations`: Dimensionstabelle für Bahnhöfe
@@ -231,6 +239,145 @@ Das System implementiert eine strikte Drei‑Schichten‑Architektur zur Trennun
 
 **Fehlertoleranz**: Airflow‑Retries bei `4xx/5xx` HTTP‑Fehlern
 
+### `db_timetables_plan_import`
+**Datei**: `airflow/dags/db_timetables_plan_dag.py`
+
+**Aufgabe**: Abruf der Fahrplan‑Daten (PLAN, XML) für Bahnhöfe im Land Bremen.
+
+**Ablauf**:
+- Auswahl der EVA‑Nummern aus `dwh.v_stations` mit Bremen‑Filter: `name LIKE 'Brem%'` und `REPLACE(ds100, '"', '') LIKE 'HB%'` (konfigurierbar über ENV, siehe unten).
+- Berechnung von Datum und Stunde aus der Airflow‑`logical_date` (`YYMMDD`/`HH`).
+- Pro EVA ein API‑Call an das DB Timetables‑Endpoint `plan`; Logging des Calls in `metadata.api_call_log`.
+- Speicherung des rohen XML als `TEXT` direkt in `stg.timetables_plan_raw.payload` (exakt wie von der API geliefert, ohne JSON‑Umverpackung).
+- Kopie nach `psa.timetables_plan_raw` und anschließendes Purge von `stg`.
+
+**Scheduling**: `0 1 * * *` (täglich um 01:00 Uhr, Europe/Berlin).
+
+**Begründung**: Der DAG lädt planmäßige Stundenfenster gesammelt: alle Stunden (`00–23`) des aktuellen Tages und die frühen Stunden (`00–05`) des Folgetages. Dies reduziert API‑Last und garantiert gleichzeitig vollständige Tagesabdeckung.
+
+#### Documentation détaillée: Endpoint DB Timetables `/plan` (FR)
+- Objet: fournit l’instantané des horaires PLAN (départs/arrivées) prévus pour une gare (EVA) à une heure précise.
+- Base URL: `https://api.deutschebahn.com/timetable/plan/{evaNo}/{date}/{hour}`.
+- Méthode: `GET`.
+- Authentification: via identifiants DB API Marketplace (variables d’environnement `DB_CLIENT_ID`, `DB_API_KEY`). Les identifiants sont transmis aux requêtes selon la configuration du client HTTP.
+
+**Paramètres**
+- `evaNo`: identifiant EVA de la gare (6–7 chiffres) pour une gare du Land de Brême.
+- `date`: date au format `YYMMDD` en fuseau `Europe/Berlin` (ex.: `250311` pour 11 mars 2025).
+- `hour`: heure au format `HH` (`00`–`23`).
+
+**Réponse (XML)**
+- Racine: `<timetable station="...">`.
+- Éléments enfant: plusieurs `<s id="...">` (un service/arrêt), contenant:
+  - `<tl ...>`: métadonnées du train (catégorie `c`, numéro `n`, opérateur `o`, origine `f`, destination `t`).
+  - `<dp ...>`: départ prévu avec attributs typiques `pt` (planned time, `YYMMDDHHMM`), `pp` (quai), `l` (ligne), `ppth` (chemin).
+  - `<ar ...>`: arrivée prévue avec attributs analogues (`pt`, `pp`, `l`).
+
+Exemple abrégé:
+
+```xml
+<timetable station="Bremen Hbf" eva="8000013">
+  <s id="1001">
+    <tl f="Oldenburg(Oldb)Hbf" t="Bremen Hbf" o="DB" c="RE" n="1"/>
+    <ar pt="2503110900" pp="5" l="S"/>
+  </s>
+  <s id="1002">
+    <tl f="Bremen Hbf" t="Vechta" o="DB" c="RB" n="2"/>
+    <dp pt="2503110915" pp="7" l="S" ppth="Bremen Hbf|Delmenhorst|..."/>
+  </s>
+</timetable>
+```
+
+Notes:
+- Le flux PLAN porte les horaires « prévus » (`pt`). Les attributs d’« heure réelle » (`rt`) sont fournis plutôt par les endpoints de changements (RCHG/FCHG).
+- Les balises optionnelles comme `wings`, `ppth` peuvent apparaître selon la desserte.
+
+**Codes de statut & erreurs**
+- `200`: succès, XML retourné.
+- `401`: identifiants invalides ou manquants.
+- `404`: combinaison `{evaNo,date,hour}` sans données.
+- `429`: dépassement de quota/rate limit.
+- `5xx`: indisponibilité côté serveur.
+
+**Orchestration Airflow (DAG `db_timetables_plan_import`)**
+- Fréquence: `0 1 * * *` (tous les jours à 01:00, Europe/Berlin).
+- Fenêtre ingérée à chaque run: heures `00–23` du jour Airflow (`logical_date`) + heures `00–05` du lendemain.
+- Filtre gares: uniquement Brême via `dwh.v_stations` (`name LIKE 'Brem%'`, `REPLACE(ds100, '"', '') LIKE 'HB%'`).
+- Stockage: insertion brute du XML en `stg.timetables_plan_raw(payload TEXT)` puis copie en `psa.timetables_plan_raw`, purge de `stg`.
+- Traçabilité: chaque appel est journalisé en `metadata.api_call_log` (source, endpoint, paramètres, statut, latence, volume).
+
+**Configuration requise**
+- `DB_CLIENT_ID`, `DB_API_KEY`: identifiants DB API Marketplace.
+- Filtres Brême: paramétrables au niveau des utilitaires stations (voir section Stations/Mapping ci‑dessus).
+- Timezone: conversion assurée via `Europe/Berlin` dans les utilitaires de date.
+
+**Exemples de requêtes**
+- `curl` (remplacez les identifiants):
+
+```
+curl -H "Authorization: Bearer <API_KEY>" \
+  "https://api.deutschebahn.com/timetable/plan/8000013/250311/09"
+```
+
+**Validation rapide (SQL)**
+- Compter les entrées PLAN du jour Airflow (STG ou PSA):
+
+```
+SELECT COUNT(*)
+FROM psa.timetables_plan_raw
+WHERE insert_ts::date = CURRENT_DATE;
+```
+
+- Inspecter un payload et vérifier la gare:
+
+```
+SELECT SUBSTRING(payload FROM 1 FOR 200)
+FROM psa.timetables_plan_raw
+ORDER BY insert_ts DESC
+LIMIT 1;
+```
+
+**Points d’attention**
+- Fuseau horaire: toujours raisonner en `Europe/Berlin` pour `date/hour`.
+- Fenêtres: il peut y avoir des services recouvrant des heures adjacentes; c’est le comportement attendu.
+- Rate limits: privilégiez l’orchestration par lots (comme le DAG) pour limiter la charge.
+
+
+### `db_timetables_fchg_import`
+**Datei**: `airflow/dags/db_timetables_fchg_dag.py`
+
+**Aufgabe**: Abruf der vollständigen Änderungen (FCHG, XML) für Bahnhöfe in Bremen.
+
+**Ablauf**:
+- Auswahl der EVA‑Nummern über `dwh.v_stations` mit Bremen‑Filter (wie oben).
+- Pro EVA ein API‑Call an `fchg`; Logging in `metadata.api_call_log`.
+- Speicherung des rohen XML als `TEXT` in `stg.timetables_fchg_raw.payload`; Kopie nach `psa.timetables_fchg_raw`; Purge von `stg`.
+
+**Scheduling**: `*/10 * * * *` (alle 10 Minuten).
+
+**Begründung**: Der FCHG‑Feed liefert umfangreiche Änderungsinformationen. 10‑Minuten‑Intervalle bieten zeitnahe Aktualität bei kontrollierter API‑Last.
+
+### `db_timetables_rchg_import`
+**Datei**: `airflow/dags/db_timetables_rchg_dag.py`
+
+**Aufgabe**: Abruf der jüngsten Änderungen (RCHG, XML) für Bahnhöfe in Bremen.
+
+**Ablauf**:
+- Auswahl der EVA‑Nummern über `dwh.v_stations` mit Bremen‑Filter (wie oben).
+- Pro EVA ein API‑Call an `rchg`; Logging in `metadata.api_call_log`.
+- Speicherung des rohen XML als `TEXT` in `stg.timetables_rchg_raw.payload`; Kopie nach `psa.timetables_rchg_raw`; Purge von `stg`.
+
+**Scheduling**: `*/10 * * * *` (alle 10 Minuten).
+
+**Begründung**: RCHG liefert kompaktes Delta der jüngsten Änderungen. Ein 10‑Minuten‑Takt stellt hohe Datenfrische für betriebsnahe Analysen sicher.
+
+#### Hilfs‑Utilities und Refactoring
+- Gemeinsame Logik wurde in `airflow/include/utils` zentralisiert, um DRY und Wartbarkeit zu gewährleisten:
+  - `date_utils.py`: Timezone‑Konvertierung (`Europe/Berlin`), Formate `YYMMDD`/`HH`.
+  - `stations.py`: EVA‑Auswahl mit konfigurierbaren Bremen‑Filtern.
+  - `timetables.py`: Orchestriert Batch‑ID‑Vergabe, API‑Aufrufe, Logging, Inserts nach `stg`, Kopie nach `psa`, Purge.
+- Die drei Timetables‑DAGs sind bewusst minimalistisch und delegieren die Geschäftslogik an diese Utilities.
+
 ### `open_meteo_forecast_import`
 **Datei**: `airflow/dags/open_meteo_dag.py`
 
@@ -261,6 +408,8 @@ Das System implementiert eine strikte Drei‑Schichten‑Architektur zur Trennun
 3. `purge_stg_weather_archive`: Bereinigung STG
 4. `transform_history_to_dwh`: Vertikalisierung und Speicherung in DWH mit Idempotenzprüfung
 
+**Regionale Einschränkung**: Es werden ausschließlich Koordinaten für Bremen über `get_bremen_station_coords()` verwendet; die API wird nur für diese Koordinaten aufgerufen.
+
 **Besonderheit**: Fenster rollierend
 - Erstlauf: `start_date = ARCHIVE_START_DATE` (z. B. `2025‑01‑01`), `end_date = heute‑2 Tage`
 - Folgeläufe: `start_date = letztes end_date` (aus `metadata.api_call_log`), `end_date = heute‑2 Tage`
@@ -281,7 +430,8 @@ Das System implementiert eine strikte Drei‑Schichten‑Architektur zur Trennun
 
 **Basisfunktionen**:
 - `insert_json`: Fügt 1 Zeile pro JSON‑Element ein; unterstützt `batch_id`
-- `log_api_call`: Parameter als JSONB; HTTP‑Status, Antwortzeit
+- `insert_text`: Fügt rohen Text (z. B. Timetables‑XML) direkt in `TEXT`‑Spalten ein; unterstützt `batch_id`
+ - `log_api_call`: Parameter als JSONB; HTTP‑Status, Antwortzeit; robuste Ergebniszählung (Antworten mit `results` oder direkter Liste)
 - `log_process_start/end`: Prozess‑Lifecycle in `metadata.process_log`
 
 **Schicht‑Transfer**:
@@ -294,7 +444,7 @@ Das System implementiert eine strikte Drei‑Schichten‑Architektur zur Trennun
 
 **DWH‑Vertikalisierung**:
 - `insert_forecast_verticalized_to_dwh`, `insert_history_verticalized_to_dwh`
-- **Station‑Mapping**: `_load_stations_for_mapping` + `_match_station_id` (Toleranz 1e‑4; Fallback auf nächsten Punkt nach euklidischer Distanz)
+ - **Station‑Mapping**: `_load_stations_for_mapping` lädt ausschließlich Bremer Stationen (Filter `name LIKE 'Brem%'`, `REPLACE(ds100, '"', '') LIKE 'HB%'`) und `_match_station_id` (Toleranz 1e‑4; Fallback auf nächsten Punkt nach euklidischer Distanz)
 - **Batch‑Insert**: `psycopg2.extras.execute_values` für Performance
 
 ---
@@ -312,7 +462,7 @@ Das System implementiert eine strikte Drei‑Schichten‑Architektur zur Trennun
 **Robustheit**: Toleranz gegenüber teilweisen Payloads; fehlende Felder werden als `NULL` gespeichert
 
 ### History (`insert_history_verticalized_to_dwh`)
-**Eingabe**: Liste von Objekten oder Einzelobjekt (automatische Erkennung)
+**Eingabe**: Liste, Einzelobjekt oder Dictionary mit Schlüssel `results` (automatisch erkannt)
 
 **Messungen**: Analog zu Forecast, ohne Niederschlagswahrscheinlichkeit, ohne Evapotranspiration und Dampfdruckdefizit
 

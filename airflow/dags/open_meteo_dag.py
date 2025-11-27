@@ -64,7 +64,11 @@ def _fetch_weather_for_coords(**context):
         log_api_call(
             source="open_meteo",
             endpoint="v1/forecast",
-            params={"coords": batch, "hourly": HOURLY_PARAMS},
+            params={
+                "coords": batch,
+                "hourly": HOURLY_PARAMS,
+                "station_count": len(batch),
+            },
             status_code=status_code,
             response_time_ms=elapsed_ms,
             result_count=(1 if payload else 0),

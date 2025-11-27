@@ -140,3 +140,66 @@ def fetch_open_meteo_archive(coords, start_date: str, end_date: str, hourly_para
         data = {"error": "invalid_json", "text": resp.text[:1000]}
 
     return data, resp.status_code, elapsed_ms
+
+
+# ===============================
+# Deutsche Bahn Timetables (XML)
+# ===============================
+
+def _db_headers_xml():
+    client_id = os.getenv("DB_CLIENT_ID", "")
+    api_key = os.getenv("DB_API_KEY", "")
+    return {
+        # Le marketplace accepte généralement cet en-tête; aligné sur la doc fournie
+        "DB-Client-Id": client_id,
+        "DB-Api-Key": api_key,
+        "accept": "application/xml",
+    }
+
+
+def fetch_db_timetables_plan(eva_no: str, date_yymmdd: str, hour_hh: str):
+    """
+    Appelle l'endpoint PLAN (XML) pour une gare EVA et une heure spécifique.
+    Retourne le texte XML brut (stocké ensuite tel quel en JSON {"xml": ...}).
+    """
+    url = (
+        "https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/plan/"
+        f"{eva_no}/{date_yymmdd}/{hour_hh}"
+    )
+    headers = _db_headers_xml()
+    start = time.time()
+    resp = requests.get(url, headers=headers, timeout=60)
+    elapsed_ms = int((time.time() - start) * 1000)
+    return resp.text, resp.status_code, elapsed_ms
+
+
+def fetch_db_timetables_fchg(eva_no: str):
+    """
+    Appelle l'endpoint FCHG (XML) pour tous les changements connus à partir de maintenant.
+    Retourne le texte XML brut.
+    """
+    url = (
+        "https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/fchg/"
+        f"{eva_no}"
+    )
+    headers = _db_headers_xml()
+    start = time.time()
+    resp = requests.get(url, headers=headers, timeout=60)
+    elapsed_ms = int((time.time() - start) * 1000)
+    return resp.text, resp.status_code, elapsed_ms
+
+
+def fetch_db_timetables_rchg(eva_no: str):
+    """
+    Appelle l'endpoint RCHG (XML) pour les changements récents.
+    Retourne le texte XML brut.
+    """
+    url = (
+        "https://apis.deutschebahn.com/db-api-marketplace/apis/timetables/v1/rchg/"
+        f"{eva_no}"
+    )
+    headers = _db_headers_xml()
+    start = time.time()
+    resp = requests.get(url, headers=headers, timeout=60)
+    elapsed_ms = int((time.time() - start) * 1000)
+    return resp.text, resp.status_code, elapsed_ms

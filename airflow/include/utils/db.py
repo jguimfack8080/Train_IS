@@ -50,6 +50,43 @@ def insert_json(table: str, payload, batch_id: str | None = None):
                     )
 
 
+def insert_text(table: str, texts: list[str] | str, batch_id: str | None = None):
+    """Insère du texte brut (par exemple XML) tel quel dans la colonne `payload`.
+
+    - Si `texts` est une liste de chaînes, effectue un insert en batch.
+    - Si `texts` est une seule chaîne, insère une seule ligne.
+    - Ne fait AUCUNE transformation (pas de JSON), conserve le contenu exactement.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            if isinstance(texts, list):
+                if batch_id is not None:
+                    values = [(t, batch_id) for t in texts]
+                    psycopg2.extras.execute_values(
+                        cur,
+                        f"INSERT INTO {table} (payload, batch_id) VALUES %s",
+                        values,
+                    )
+                else:
+                    values = [(t,) for t in texts]
+                    psycopg2.extras.execute_values(
+                        cur,
+                        f"INSERT INTO {table} (payload) VALUES %s",
+                        values,
+                    )
+            else:
+                if batch_id is not None:
+                    cur.execute(
+                        f"INSERT INTO {table} (payload, batch_id) VALUES (%s, %s)",
+                        (texts, batch_id),
+                    )
+                else:
+                    cur.execute(
+                        f"INSERT INTO {table} (payload) VALUES (%s)",
+                        (texts,),
+                    )
+
+
 def log_api_call(source: str, endpoint: str, params: dict, status_code: int, response_time_ms: int, result_count: int, called_at):
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -166,6 +203,66 @@ def purge_stg_weather_archive():
             cur.execute("TRUNCATE TABLE stg.weather_history_raw")
 
 
+def copy_timetables_plan_stg_to_psa():
+    # Persistente Kopie der Timetables PLAN von STG nach PSA
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO psa.timetables_plan_raw (payload, batch_id, ingested_at)
+                SELECT s.payload, s.batch_id, s.ingested_at
+                FROM stg.timetables_plan_raw s
+                """
+            )
+
+
+def purge_stg_timetables_plan():
+    # STG‑Bereinigung für Timetables PLAN
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE TABLE stg.timetables_plan_raw")
+
+
+def copy_timetables_fchg_stg_to_psa():
+    # Persistente Kopie der Timetables FCHG von STG nach PSA
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO psa.timetables_fchg_raw (payload, batch_id, ingested_at)
+                SELECT s.payload, s.batch_id, s.ingested_at
+                FROM stg.timetables_fchg_raw s
+                """
+            )
+
+
+def purge_stg_timetables_fchg():
+    # STG‑Bereinigung für Timetables FCHG
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE TABLE stg.timetables_fchg_raw")
+
+
+def copy_timetables_rchg_stg_to_psa():
+    # Persistente Kopie der Timetables RCHG von STG nach PSA
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO psa.timetables_rchg_raw (payload, batch_id, ingested_at)
+                SELECT s.payload, s.batch_id, s.ingested_at
+                FROM stg.timetables_rchg_raw s
+                """
+            )
+
+
+def purge_stg_timetables_rchg():
+    # STG‑Bereinigung für Timetables RCHG
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE TABLE stg.timetables_rchg_raw")
+
+
 def _get_latest_batch_id(table: str) -> str | None:
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -232,12 +329,26 @@ def _fetch_psa_entries(table: str, batch_id: str) -> list[tuple[int, dict]]:
 
 
 def _load_stations_for_mapping() -> list[tuple[str, float, float]]:
-    """Lädt station_id, Latitude, Longitude für das Mapping in Python."""
+    """Charge uniquement les stations de Brême (station_id, latitude, longitude) pour le mapping.
+
+    Filtre aligné sur get_bremen_station_coords():
+      - latitude/longitude non null
+      - eva_number non null
+      - name LIKE 'Brem%'
+      - REPLACE(ds100, '"', '') LIKE 'HB%'
+    """
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT station_id, latitude, longitude FROM dwh.v_stations "
-                "WHERE latitude IS NOT NULL AND longitude IS NOT NULL"
+                """
+                SELECT station_id, latitude, longitude
+                FROM dwh.v_stations
+                WHERE latitude IS NOT NULL
+                  AND longitude IS NOT NULL
+                  AND eva_number IS NOT NULL
+                  AND name LIKE 'Brem%'
+                  AND REPLACE(ds100, '"', '') LIKE 'HB%'
+                """
             )
             return [(str(sid), float(lat), float(lon)) for sid, lat, lon in cur.fetchall()]
 
@@ -343,8 +454,14 @@ def insert_history_verticalized_to_dwh(batch_id: str | None = None) -> int:
     rows_to_insert = []
     for psa_id, payload in entries:
         try:
-            # History: Payload kann eine Liste von Objekten oder ein einzelnes Objekt sein
-            objs = payload if isinstance(payload, list) else [payload]
+            # History: Payload kann eine Liste von Objekten, ein einzelnes Objekt
+            # oder ein Dict mit Schlüssel 'results' (Liste von Objekten) sein
+            if isinstance(payload, list):
+                objs = payload
+            elif isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                objs = payload.get("results")
+            else:
+                objs = [payload]
             for obj in objs:
                 lat = float(obj.get("latitude")) if obj.get("latitude") is not None else None
                 lon = float(obj.get("longitude")) if obj.get("longitude") is not None else None

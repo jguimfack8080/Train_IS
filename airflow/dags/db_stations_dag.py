@@ -80,7 +80,7 @@ with DAG(
     dag_id="db_stations_import",
     default_args=DEFAULT_ARGS,
     description="Importiert Bahnstationen (Rohdaten) in STG und loggt den API-Call",
-    schedule_interval="@daily",
+    schedule_interval="@monthly",
     start_date=days_ago(1),
     catchup=False,
 ) as dag:

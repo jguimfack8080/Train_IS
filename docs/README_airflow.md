@@ -67,6 +67,7 @@
   - Archive: Startfenster via ENV (`ARCHIVE_START_DATE`) und Granularität (`OPEN_METEO_ARCHIVE_HOURLY`); Enddatum ist immer „heute‑2 Tage“ (J‑2) und wird automatisch gesetzt.
 - ELT‑Ansatz mit JSONB
   - Entscheidung: Rohpayloads in JSONB speichern und über Views konsumieren.
+  - Hinweis: Timetables‑Feeds liefern XML und werden unverändert als `TEXT` gespeichert (kein JSON‑Wrapping), um den API‑Return exakt zu erhalten.
   - Begründung: flexible Schemaentwicklung, schnelle Aufnahme, geringere Migrationskosten; klare, versionierbare Extraktion in `v_weather_*_hourly`.
 – Scheduling und Catchup
   - Forecast: `0 */6 * * *`, `catchup=false` (laufende Aktualisierung der Prognosen über den Tag).
