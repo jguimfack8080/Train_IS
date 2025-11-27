@@ -398,6 +398,7 @@ Zur besseren analytischen Nutzung der Fahrplandaten wurden folgende Änderungen 
 - FCHG‑Transformation (DWH): Die Ereignistabelle nutzt jetzt `eva_number` als Stationskennung und ist vollständig dokumentiert (Spaltenkommentare). Pro Meldung wird eine Zeile mit Zeit, Typ, Kategorie, Priorität, Verspätung und Bahnsteigwechsel erzeugt.
 - PLAN‑Transformation (DWH): Neuer Speicherpfad für planmäßige Abfahrts‑/Ankunftsereignisse in `dwh.timetables_plan_events` mit den Feldern Stationsname, Service‑ID, Zugnummer, Zuggattung, Typ, Richtung, Ereignistyp (`dp/ar`), Zeit, Gleis, `train_line_name`, Route und Batch. Der DAG `db_timetables_plan_import` führt die Transformation automatisch nach der Ingestion aus.
  - RCHG‑Transformation (DWH): Jüngste Änderungen (`m/ar/dp`) werden in `dwh.timetables_rchg_events` gespeichert. Eine Zeile je Ereignis mit klaren Feldern (Ereignis‑ID, EVA, Station, Nachricht/Typ/Kategorie/Änderungstyp/Priorität, Gültigkeiten, alte/neue Zeit, Verspätung, Gleis/Wechsel, Route, `train_line_name`, Ereigniszeit, Batch) und garantierter Deduplikation über `event_hash`. Der DAG `db_timetables_rchg_import` führt die Transformation direkt nach der Ingestion aus.
+ - RCHG‑Schema‑Anpassung: Entfernung der Felder `train_number`, `train_category`, `train_type`, `train_direction`; Feld `train_line_name` bleibt erhalten (Anforderung Fachlogik).
 - Idempotenz und Logging: Beide Transformationen protokollieren `success/skipped` in `metadata.process_log` und verhindern doppelte Einfügungen.
 - Indizes: Selektive Indizes auf Station und Zeit wurden ergänzt, um typische Abfragen (Fenster, Bahnhof) zu beschleunigen.
 
@@ -433,27 +434,21 @@ Zur besseren analytischen Nutzung der Fahrplandaten wurden folgende Änderungen 
 - `fetch_open_meteo_forecast`: URL‑Bau mit gerundeten Koordinatenlisten; Timeout und JSON‑Parsing
 - `fetch_open_meteo_archive`: Analog zu Forecast mit `start_date`, `end_date` und `hourly`‑Parametern
 
-### `utils/db.py`
-**Verbindungen**: Parameter aus ENV; `get_connection()` zentralisiert `psycopg2.connect`
+### Refactorisation des utilitaires DB
+Le module `utils/db.py` sert désormais de façade légère et ré‑exporte des fonctions depuis des modules spécialisés. Ceci améliore la lisibilité, supprime les doublons et maintient la compatibilité des imports existants.
 
-**Basisfunktionen**:
-- `insert_json`: Fügt 1 Zeile pro JSON‑Element ein; unterstützt `batch_id`
-- `insert_text`: Fügt rohen Text (z. B. Timetables‑XML) direkt in `TEXT`‑Spalten ein; unterstützt `batch_id`
- - `log_api_call`: Parameter als JSONB; HTTP‑Status, Antwortzeit; robuste Ergebniszählung (Antworten mit `results` oder direkter Liste)
-- `log_process_start/end`: Prozess‑Lifecycle in `metadata.process_log`
+**Modules introduits**:
+- `utils/db_conn.py`: paramètres de connexion DB via ENV; `get_connection()` centralisé
+- `utils/db_insert.py`: `insert_json`, `insert_text` (insertion bulk, support `batch_id`)
+- `utils/db_logs.py`: `log_api_call`, `log_process_start`, `log_process_end`, `is_batch_processed`
+- `utils/db_batch.py`: `_get_latest_batch_id`, `get_latest_forecast_batch_id`, `get_latest_history_batch_id`, `get_last_archive_end_date`
+- `utils/db_stg_psa.py`: `copy_*` et `purge_*` pour Stations, Forecast, Archive, Timetables (STG → PSA)
+- `utils/weather_transform.py`: `insert_forecast_verticalized_to_dwh`, `insert_history_verticalized_to_dwh`, mapping station (tolérance 1e‑4)
 
-**Schicht‑Transfer**:
-- `copy_*` und `purge_*` für Stationen, Vorhersage, Archiv (STG ↔ PSA)
-
-**Batch‑Helfer**:
-- `_get_latest_batch_id`, `get_latest_forecast_batch_id`, `get_latest_history_batch_id`
-- `is_batch_processed`: Idempotenzprüfung für Transformationen
- - `get_last_archive_end_date`: Liefert das letzte genutzte `end_date` für Archive aus `metadata.api_call_log`
-
-**DWH‑Vertikalisierung**:
-- `insert_forecast_verticalized_to_dwh`, `insert_history_verticalized_to_dwh`
- - **Station‑Mapping**: `_load_stations_for_mapping` lädt ausschließlich Bremer Stationen (Filter `name LIKE 'Brem%'`, `REPLACE(ds100, '"', '') LIKE 'HB%'`) und `_match_station_id` (Toleranz 1e‑4; Fallback auf nächsten Punkt nach euklidischer Distanz)
-- **Batch‑Insert**: `psycopg2.extras.execute_values` für Performance
+**Façade `utils/db.py`**:
+- Expose toutes les fonctions ci‑dessus pour compatibilité (`from utils import db as db_utils`)
+- Conserve les transformations Timetables vers DWH: `insert_timetables_fchg_events_to_dwh`, `insert_timetables_plan_events_to_dwh`, `insert_timetables_rchg_events_to_dwh`
+- Continue d’utiliser les inserts en masse (`psycopg2.extras.execute_values`) et l’idempotence via `metadata.process_log`
 
 ---
 
