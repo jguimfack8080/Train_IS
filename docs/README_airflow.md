@@ -110,3 +110,10 @@
 ## Migrationshinweis
 - Der frühere DAG `weather_transform_dwh` wurde entfernt.
 - Die Transformationsschritte sind nun fest in `open_meteo_forecast_import` und `open_meteo_archive_import` integriert und idempotent.
+
+## Änderungen und Updates (Timetables & DWH)
+In den Timetables‑Pipelines wurden folgende Aktualisierungen vorgenommen, um Analyse und ML zu erleichtern:
+- FCHG‑Transformation: Die DWH‑Tabelle verwendet jetzt das Stationsfeld `eva_number` anstelle von `station_id`. Die Aufgabe `transform_fchg_to_dwh` erzeugt pro Meldung eine Zeile mit Zeit, Typ, Kategorie, Priorität, Verspätung und Bahnsteigwechsel.
+- PLAN‑Transformation: Der DAG `db_timetables_plan_import` wurde erweitert um die Aufgabe `transform_plan_to_dwh`. Diese schreibt planmäßige Abfahrts‑/Ankunftsereignisse (Felder: Stationsname, Service‑ID, Zugnummer, Zuggattung, Typ, Richtung, Ereignistyp `dp/ar`, Zeit, Gleis, `train_line_name`, Route, Batch) in `dwh.timetables_plan_events`.
+- Idempotenz: Beide Transformationen protokollieren ihren Erfolg in `metadata.process_log` und überspringen bereits verarbeitete Batches.
+- Indizes: Selektive Indizes auf Zeit und Station verbessern die Abfrageleistung in den neuen Tabellen.

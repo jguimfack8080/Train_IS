@@ -658,3 +658,89 @@ def is_batch_processed(process_name: str, batch_id: str) -> bool:
                 (process_name, batch_id),
             )
             return cur.fetchone() is not None
+
+
+def insert_timetables_plan_events_to_dwh(batch_id: str | None = None) -> int:
+    table = "psa.timetables_plan_raw"
+    if batch_id is None:
+        batch_id = _get_latest_batch_id(table)
+    if batch_id is None:
+        return 0
+
+    def _ts_to_iso(s: str | None) -> str | None:
+        if not s:
+            return None
+        s = str(s)
+        if len(s) == 10 and s.isdigit():
+            y = int("20" + s[0:2])
+            m = int(s[2:4])
+            d = int(s[4:6])
+            hh = int(s[6:8])
+            mm = int(s[8:10])
+            return f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:00Z"
+        return None
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, payload FROM psa.timetables_plan_raw WHERE batch_id = %s",
+                (batch_id,),
+            )
+            rows = cur.fetchall()
+
+    to_insert = []
+    seen = set()
+    for psa_id, xml_text in rows:
+        try:
+            root = ET.fromstring(xml_text)
+        except Exception:
+            continue
+        station_name = root.attrib.get("station")
+        for s in root.findall("s"):
+            service_id = s.attrib.get("id")
+            tl = s.find("tl")
+            train_number = tl.attrib.get("n") if tl is not None else None
+            train_category = tl.attrib.get("c") if tl is not None else None
+            train_type = tl.attrib.get("t") if tl is not None else None
+            train_direction = tl.attrib.get("f") if tl is not None else None
+            for parent_tag in ("dp", "ar"):
+                for node in s.findall(parent_tag):
+                    event_type = parent_tag
+                    event_time = _ts_to_iso(node.attrib.get("pt"))
+                    platform = node.attrib.get("pp")
+                    train_line_name = node.attrib.get("l")
+                    route_path = node.attrib.get("ppth")
+                    key = (
+                        station_name,
+                        service_id,
+                        train_number,
+                        train_category,
+                        train_type,
+                        train_direction,
+                        event_type,
+                        event_time,
+                        platform,
+                        train_line_name,
+                        route_path,
+                        batch_id,
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    to_insert.append(key)
+
+    if not to_insert:
+        return 0
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    """
+                    INSERT INTO dwh.timetables_plan_events
+                    (station_name, service_id, train_number, train_category, train_type, train_direction, event_type, event_time, platform, train_line_name, route_path, batch_id)
+                    VALUES %s
+                    """,
+                    to_insert,
+                )
+    return len(to_insert)

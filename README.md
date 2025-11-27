@@ -393,6 +393,13 @@ LIMIT 1;
 3. `purge_stg_weather`: Bereinigung STG
 4. `transform_forecast_to_dwh`: Vertikalisierung und Speicherung in DWH mit Idempotenzprüfung
 
+### Änderungen und Updates (Timetables & DWH)
+Zur besseren analytischen Nutzung der Fahrplandaten wurden folgende Änderungen implementiert:
+- FCHG‑Transformation (DWH): Die Ereignistabelle nutzt jetzt `eva_number` als Stationskennung und ist vollständig dokumentiert (Spaltenkommentare). Pro Meldung wird eine Zeile mit Zeit, Typ, Kategorie, Priorität, Verspätung und Bahnsteigwechsel erzeugt.
+- PLAN‑Transformation (DWH): Neuer Speicherpfad für planmäßige Abfahrts‑/Ankunftsereignisse in `dwh.timetables_plan_events` mit den Feldern Stationsname, Service‑ID, Zugnummer, Zuggattung, Typ, Richtung, Ereignistyp (`dp/ar`), Zeit, Gleis, `train_line_name`, Route und Batch. Der DAG `db_timetables_plan_import` führt die Transformation automatisch nach der Ingestion aus.
+- Idempotenz und Logging: Beide Transformationen protokollieren `success/skipped` in `metadata.process_log` und verhindern doppelte Einfügungen.
+- Indizes: Selektive Indizes auf Station und Zeit wurden ergänzt, um typische Abfragen (Fenster, Bahnhof) zu beschleunigen.
+
 **Besonderheit**: Transformation ist integriert; bereits verarbeitete Batches werden als `skipped` protokolliert
 
 ### `open_meteo_archive_import`
@@ -740,4 +747,3 @@ Cette table contient une version normalisée des événements issus du flux FCHG
 - **Analyse des incidents ferroviaires** : filtrer `type = 'h'` et `category = 'Störung'`.  
 - **Suivi des retards** : filtrer `type IN ('d','f')` et `delay_minutes IS NOT NULL`.  
 - **Agrégations par gare et par heure** : compter les événements, calculer des indicateurs (retard moyen, volume d’incidents), préparer des features pour le machine learning.
-

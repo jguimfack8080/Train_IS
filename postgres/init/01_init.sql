@@ -417,3 +417,38 @@ CREATE INDEX IF NOT EXISTS idx_dwh_weather_history_vertical_raw_batch_id ON dwh.
 CREATE INDEX IF NOT EXISTS idx_dwh_timetables_fchg_events_eva_number ON dwh.timetables_fchg_events(eva_number);
 CREATE INDEX IF NOT EXISTS idx_dwh_timetables_fchg_events_time ON dwh.timetables_fchg_events(event_time);
 CREATE INDEX IF NOT EXISTS idx_dwh_timetables_fchg_events_category ON dwh.timetables_fchg_events(category);
+
+-- Timetables PLAN événements transformés
+CREATE TABLE IF NOT EXISTS dwh.timetables_plan_events (
+  id BIGSERIAL PRIMARY KEY,
+  station_name TEXT,
+  service_id TEXT,
+  train_number TEXT,
+  train_category TEXT,
+  train_type TEXT,
+  train_direction TEXT,
+  event_type TEXT,
+  event_time TIMESTAMPTZ,
+  platform TEXT,
+  train_line_name TEXT,
+  route_path TEXT,
+  batch_id TEXT,
+  inserted_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_dwh_timetables_plan_events_station ON dwh.timetables_plan_events(station_name);
+CREATE INDEX IF NOT EXISTS idx_dwh_timetables_plan_events_time ON dwh.timetables_plan_events(event_time);
+
+COMMENT ON TABLE dwh.timetables_plan_events IS 'Transformierte Plan-Ereignisse aus DB Timetables PLAN (XML); eine Zeile je Abfahrt/Ankunft';
+COMMENT ON COLUMN dwh.timetables_plan_events.station_name IS 'Stationsname aus <timetable station="...">';
+COMMENT ON COLUMN dwh.timetables_plan_events.service_id IS 'Dienst-/Fahrt-Identifikator (<s id="...">)';
+COMMENT ON COLUMN dwh.timetables_plan_events.train_number IS 'Zugnummer (<tl n="...">)';
+COMMENT ON COLUMN dwh.timetables_plan_events.train_category IS 'Zuggattung (z. B. ICE, RE) (<tl c="...">)';
+COMMENT ON COLUMN dwh.timetables_plan_events.train_type IS 'Zugtyp/Betriebsart (<tl t="...">)';
+COMMENT ON COLUMN dwh.timetables_plan_events.train_direction IS 'Richtungshinweis (<tl f="...">)';
+COMMENT ON COLUMN dwh.timetables_plan_events.event_type IS 'Ereignistyp: dp=Abfahrt, ar=Ankunft (Knotentyp)';
+COMMENT ON COLUMN dwh.timetables_plan_events.event_time IS 'Planzeit des Ereignisses (pt) als TIMESTAMPTZ';
+COMMENT ON COLUMN dwh.timetables_plan_events.platform IS 'Gleis/Bahnsteig (pp)';
+
+COMMENT ON COLUMN dwh.timetables_plan_events.route_path IS 'Route/Stationsfolge (ppth)';
+COMMENT ON COLUMN dwh.timetables_plan_events.batch_id IS 'Logische Batch-ID des Pipeline-Laufs (Nachverfolgbarkeit)';
+COMMENT ON COLUMN dwh.timetables_plan_events.inserted_at IS 'Zeitpunkt der Einfügung in das DWH (Serverzeit)';
