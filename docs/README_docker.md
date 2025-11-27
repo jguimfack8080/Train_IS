@@ -28,5 +28,6 @@
 - Die Installation von Python-Abhängigkeiten erfolgt beim Containerstart.
  - Zugriff auf pgAdmin: `http://localhost:8081` (Login aus `.env`: `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD`).
    - In pgAdmin neuen Server anlegen: Name frei, Host: `postgres`, Port: `5432`, Maintenance DB: `postgres` (oder `train_dw` nach Init), Benutzer: `postgres` (oder `dw`), Passwort: aus `.env`.
- - Ports: Airflow Web UI `http://localhost:8085`, Postgres lokal `localhost:5433` (weitergeleitet auf Containerport `5432`).
- - Postgres Init: `POSTGRES_DB=postgres`; die Fach-Datenbank `train_dw` wird durch `postgres/init/01_init.sql` mit Owner `dw` erstellt (kein `ALTER`).
+- Ports: Airflow Web UI `http://localhost:8085`, Postgres lokal `localhost:5433` (weitergeleitet auf Containerport `5432`).
+- Postgres Init: `POSTGRES_DB=postgres`; die Fach-Datenbank `train_dw` wird durch `postgres/init/01_init.sql` mit Owner `dw` erstellt (kein `ALTER`).
+ - DWH: Ereignistabelle `dwh.timetables_fchg_events` (EVA‑basiert) wird durch den FCHG‑Import‑DAG befüllt.

@@ -20,6 +20,7 @@
 - `psa.*` – persistente Kopien der Rohdaten.
 - `dwh.stations` – bereinigte Stationsdaten mit Koordinaten.
 - `dwh.weather_hourly` – aufbereitete Wetterzeitreihen.
+ - `dwh.timetables_fchg_events` – transformierte Ereignisse aus FCHG (EVA‑basiert; eine Zeile je Ereignis mit `eva_number`, `station_name`, `event_time`, `type`, `category`, `priority`, `delay_minutes`, `valid_from`, `valid_to`, `platform_change`, `batch_id`).
 
 ## Zugriff aus Airflow
 - Verbindungsparameter via Umgebungsvariablen `DATA_DB_*`.

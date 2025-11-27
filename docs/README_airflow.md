@@ -32,6 +32,15 @@
 
 - Nachverfolgbarkeit via `psa_id` und `batch_id`; Views: `dwh.v_weather_forecast_hourly`, `dwh.v_weather_history_hourly`.
 
+### Timetables (PLAN/FCHG/RCHG)
+- Import‑DAGs: `db_timetables_plan_import`, `db_timetables_fchg_import`, `db_timetables_rchg_import`
+- Speicherung: Roh‑XML in `stg.timetables_*_raw(payload TEXT)`, Kopie nach `psa.timetables_*_raw`
+- Transformation (FCHG): Aufgabe `transform_fchg_to_dwh` schreibt Ereignisse nach `dwh.timetables_fchg_events` mit Feldern
+  - `eva_number`, `station_name`, `event_time` (bevorzugt `ct` aus `<ar>/<dp>`, sonst `ts` aus `<m>`)
+  - `message_id`, `type` (`d`/`f`/`h`), `category` (z. B. `Störung`, `Information`), `priority`
+  - `delay_minutes` (`c`), `valid_from`/`valid_to` (`from`/`to`), `platform_change` (`cp`)
+  - `batch_id`
+
 ## Umgebungsvariablen
 - `DB_CLIENT_ID`, `DB_API_KEY` – Deutsche Bahn API Credentials.
 - `DATA_DB_*` – Verbindungsdaten zur DWH-Datenbank (`train_dw`).
