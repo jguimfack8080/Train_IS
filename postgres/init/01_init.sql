@@ -198,30 +198,44 @@ CREATE TABLE IF NOT EXISTS dwh.timetables_fchg_events (
   id BIGSERIAL PRIMARY KEY,
   eva_number TEXT,
   station_name TEXT,
+  train_name TEXT,
+  final_destination_station TEXT,
+  delay_in_min INT,
   event_time TIMESTAMPTZ,
-  message_id TEXT,
+  is_canceled BOOLEAN,
   type TEXT,
   category TEXT,
   priority INT,
-  delay_minutes INT,
-  valid_from TIMESTAMPTZ,
-  valid_to TIMESTAMPTZ,
-  platform_change TEXT,
+  train_type TEXT,
+  train_line_ride_id TEXT,
+  train_line_station_num BIGINT,
+  arrival_planned_time TIMESTAMPTZ,
+  arrival_change_time TIMESTAMPTZ,
+  departure_planned_time TIMESTAMPTZ,
+  departure_change_time TIMESTAMPTZ,
+  message_id TEXT,
   batch_id TEXT,
   inserted_at TIMESTAMPTZ DEFAULT NOW()
 );
 COMMENT ON TABLE dwh.timetables_fchg_events IS 'Transformierte Ereignisse aus DB Timetables FCHG (XML) für Analyse/ML; eine Zeile je Ereignis (Meldung oder Verspätungsänderung)';
 COMMENT ON COLUMN dwh.timetables_fchg_events.eva_number IS 'EVA-Nummer des Bahnhofs (eindeutiger Stations-Identifikator aus <timetable eva="...">)';
 COMMENT ON COLUMN dwh.timetables_fchg_events.station_name IS 'Stationsname aus dem XML-Root (<timetable station="...">)';
-COMMENT ON COLUMN dwh.timetables_fchg_events.event_time IS 'Ereigniszeitpunkt: bevorzugt ct des Elternknotens (<ar>/<dp>), sonst ts der Meldung (<m>); als TIMESTAMPTZ gespeichert';
-COMMENT ON COLUMN dwh.timetables_fchg_events.message_id IS 'ID der Meldung (<m id="...">), eindeutiger Nachrichten-Identifikator';
-COMMENT ON COLUMN dwh.timetables_fchg_events.type IS 'Typ des Ereignisses: d=Abfahrt, f=Ankunft, h=Hinweis/Info (wie im Attribut <m t="...">)';
-COMMENT ON COLUMN dwh.timetables_fchg_events.category IS 'Kategorie der Meldung (z. B. Störung, Information); nur für <m> auf Ebene <s> vorhanden';
-COMMENT ON COLUMN dwh.timetables_fchg_events.priority IS 'Priorität der Meldung (pr), falls angegeben';
-COMMENT ON COLUMN dwh.timetables_fchg_events.delay_minutes IS 'Verspätungscode in Minuten (c) aus Meldungen unter <ar>/<dp>';
-COMMENT ON COLUMN dwh.timetables_fchg_events.valid_from IS 'Beginn der Gültigkeit (from) einer Hinweis-/Störungsmeldung; TIMESTAMPTZ';
-COMMENT ON COLUMN dwh.timetables_fchg_events.valid_to IS 'Ende der Gültigkeit (to) einer Hinweis-/Störungsmeldung; TIMESTAMPTZ';
-COMMENT ON COLUMN dwh.timetables_fchg_events.platform_change IS 'Bahnsteig/Gleisänderung (cp) aus <ar>/<dp>, falls vorhanden';
+COMMENT ON COLUMN dwh.timetables_fchg_events.train_name IS 'Zugname/Nummer aus <tl n="...">';
+COMMENT ON COLUMN dwh.timetables_fchg_events.final_destination_station IS 'Letzte Station aus Route (<ppth>/<cpth>)';
+COMMENT ON COLUMN dwh.timetables_fchg_events.delay_in_min IS 'Verspätung in Minuten aus <m c="...">';
+COMMENT ON COLUMN dwh.timetables_fchg_events.event_time IS 'Zeit des Ereignisses: bevorzugt ct (<ar>/<dp>), sonst ts der Meldung';
+COMMENT ON COLUMN dwh.timetables_fchg_events.is_canceled IS 'True wenn t="f" und c>0 in beliebiger Meldung';
+COMMENT ON COLUMN dwh.timetables_fchg_events.type IS 'Typ der Meldung (<m t="...">)';
+COMMENT ON COLUMN dwh.timetables_fchg_events.category IS 'Kategorie der Meldung (<m cat="...">)';
+COMMENT ON COLUMN dwh.timetables_fchg_events.priority IS 'Priorität (<m pr="...">)';
+COMMENT ON COLUMN dwh.timetables_fchg_events.train_type IS 'Gattung aus <tl c="...">';
+COMMENT ON COLUMN dwh.timetables_fchg_events.train_line_ride_id IS 'Ride-ID aus <s id="...">';
+COMMENT ON COLUMN dwh.timetables_fchg_events.train_line_station_num IS 'Liniennummer aus <ar>/<dp l="...">';
+COMMENT ON COLUMN dwh.timetables_fchg_events.arrival_planned_time IS 'Geplante Ankunftszeit (<ar pt>)';
+COMMENT ON COLUMN dwh.timetables_fchg_events.arrival_change_time IS 'Geänderte Ankunftszeit (<ar ct>)';
+COMMENT ON COLUMN dwh.timetables_fchg_events.departure_planned_time IS 'Geplante Abfahrtszeit (<dp pt>)';
+COMMENT ON COLUMN dwh.timetables_fchg_events.departure_change_time IS 'Geänderte Abfahrtszeit (<dp ct>)';
+COMMENT ON COLUMN dwh.timetables_fchg_events.message_id IS 'Meldungs-ID (<m id="...">)';
 COMMENT ON COLUMN dwh.timetables_fchg_events.batch_id IS 'Logische Batch-ID des Pipeline-Laufs (Nachverfolgbarkeit über metadata.process_log)';
 COMMENT ON COLUMN dwh.timetables_fchg_events.inserted_at IS 'Zeitpunkt der Einfügung in das DWH (Serverzeit)';
 
@@ -422,7 +436,7 @@ CREATE INDEX IF NOT EXISTS idx_dwh_timetables_fchg_events_category ON dwh.timeta
 CREATE TABLE IF NOT EXISTS dwh.timetables_plan_events (
   id BIGSERIAL PRIMARY KEY,
   station_name TEXT,
-  service_id TEXT,
+  train_line_ride_id TEXT,
   train_number TEXT,
   train_category TEXT,
   train_type TEXT,
@@ -440,7 +454,7 @@ CREATE INDEX IF NOT EXISTS idx_dwh_timetables_plan_events_time ON dwh.timetables
 
 COMMENT ON TABLE dwh.timetables_plan_events IS 'Transformierte Plan-Ereignisse aus DB Timetables PLAN (XML); eine Zeile je Abfahrt/Ankunft';
 COMMENT ON COLUMN dwh.timetables_plan_events.station_name IS 'Stationsname aus <timetable station="...">';
-COMMENT ON COLUMN dwh.timetables_plan_events.service_id IS 'Dienst-/Fahrt-Identifikator (<s id="...">)';
+COMMENT ON COLUMN dwh.timetables_plan_events.train_line_ride_id IS 'Fahrt-Identifikator/Linienlauf (<s id="...">)';
 COMMENT ON COLUMN dwh.timetables_plan_events.train_number IS 'Zugnummer (<tl n="...">)';
 COMMENT ON COLUMN dwh.timetables_plan_events.train_category IS 'Zuggattung (z. B. ICE, RE) (<tl c="...">)';
 COMMENT ON COLUMN dwh.timetables_plan_events.train_type IS 'Zugtyp/Betriebsart (<tl t="...">)';
@@ -448,6 +462,7 @@ COMMENT ON COLUMN dwh.timetables_plan_events.train_direction IS 'Richtungshinwei
 COMMENT ON COLUMN dwh.timetables_plan_events.event_type IS 'Ereignistyp: dp=Abfahrt, ar=Ankunft (Knotentyp)';
 COMMENT ON COLUMN dwh.timetables_plan_events.event_time IS 'Planzeit des Ereignisses (pt) als TIMESTAMPTZ';
 COMMENT ON COLUMN dwh.timetables_plan_events.platform IS 'Gleis/Bahnsteig (pp)';
+COMMENT ON COLUMN dwh.timetables_plan_events.train_line_name IS 'Linienname (l) aus dem Ereignisknoten <dp>/<ar>, z. B. RS1/51';
 
 COMMENT ON COLUMN dwh.timetables_plan_events.route_path IS 'Route/Stationsfolge (ppth)';
 COMMENT ON COLUMN dwh.timetables_plan_events.batch_id IS 'Logische Batch-ID des Pipeline-Laufs (Nachverfolgbarkeit)';

@@ -65,6 +65,22 @@ def insert_timetables_fchg_events_to_dwh(batch_id: str | None = None) -> int:
             return f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:00Z"
         return None
 
+    def _tts_to_iso(s: str | None) -> str | None:
+        if not s:
+            return None
+        s = str(s)
+        try:
+            yy = int(s[0:2])
+            y = int("20" + s[0:2])
+            m = int(s[3:5])
+            d = int(s[6:8])
+            hh = int(s[9:11])
+            mm = int(s[12:14])
+            ss = int(s[15:17])
+            return f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}Z"
+        except Exception:
+            return None
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -82,54 +98,113 @@ def insert_timetables_fchg_events_to_dwh(batch_id: str | None = None) -> int:
         station_name = root.attrib.get("station")
         eva_number = root.attrib.get("eva")
         for s in root.findall("s"):
+            tl = s.find("tl")
+            train_type = tl.attrib.get("c") if tl is not None else None
+            ar_node = s.find("ar")
+            dp_node = s.find("dp")
+            ar_pt = _ts_to_iso(ar_node.attrib.get("pt")) if ar_node is not None else None
+            ar_ct = _ts_to_iso(ar_node.attrib.get("ct")) if ar_node is not None else None
+            dp_pt = _ts_to_iso(dp_node.attrib.get("pt")) if dp_node is not None else None
+            dp_ct = _ts_to_iso(dp_node.attrib.get("ct")) if dp_node is not None else None
+            ar_l = ar_node.attrib.get("l") if ar_node is not None else None
+            dp_l = dp_node.attrib.get("l") if dp_node is not None else None
+            train_name = ar_l or dp_l
+            ride_id = s.attrib.get("id")
+            line_num = None
+            try:
+                line_num = int(ar_l) if ar_l and str(ar_l).isdigit() else int(dp_l) if dp_l and str(dp_l).isdigit() else None
+            except Exception:
+                line_num = None
+            dest = None
+            if ar_node is not None:
+                ppth = ar_node.attrib.get("ppth") or ar_node.attrib.get("cpth")
+                if ppth:
+                    parts = str(ppth).split("|")
+                    dest = parts[-1] if parts else None
+            if dest is None and dp_node is not None:
+                ppth = dp_node.attrib.get("ppth") or dp_node.attrib.get("cpth")
+                if ppth:
+                    parts = str(ppth).split("|")
+                    dest = parts[-1] if parts else None
+            canceled = False
+            for node in [ar_node, dp_node]:
+                if node is None:
+                    continue
+                for m in node.findall("m"):
+                    mt = m.attrib.get("t")
+                    mc = m.attrib.get("c")
+                    if mt == "f" and mc is not None and str(mc).isdigit() and int(mc) > 0:
+                        canceled = True
+                        break
+
             for m in s.findall("m"):
                 msg_id = m.attrib.get("id")
                 t = m.attrib.get("t")
                 cat = m.attrib.get("cat")
                 pr = m.attrib.get("pr")
-                ts = _ts_to_iso(m.attrib.get("ts"))
-                vf = _ts_to_iso(m.attrib.get("from"))
-                vt = _ts_to_iso(m.attrib.get("to"))
+                ts = _ts_to_iso(m.attrib.get("ts")) or _tts_to_iso(m.attrib.get("ts-tts"))
+                c = m.attrib.get("c")
+                delay = int(c) if c is not None and str(c).isdigit() else None
                 row = (
                     eva_number,
                     station_name,
+                    train_name,
+                    dest,
+                    delay,
                     ts,
-                    msg_id,
+                    True if t == "f" and delay is not None and delay > 0 else canceled,
                     t,
                     cat,
                     int(pr) if pr is not None and str(pr).isdigit() else None,
-                    None,
-                    vf,
-                    vt,
-                    None,
+                    train_type,
+                    ride_id,
+                    line_num,
+                    ar_pt,
+                    ar_ct,
+                    dp_pt,
+                    dp_ct,
+                    msg_id,
                     batch_id,
                 )
                 to_insert.append(row)
+
             for parent_tag in ("ar", "dp"):
-                for node in s.findall(parent_tag):
-                    ct = _ts_to_iso(node.attrib.get("ct"))
-                    cp = node.attrib.get("cp")
-                    for m in node.findall("m"):
-                        msg_id = m.attrib.get("id")
-                        t = m.attrib.get("t")
-                        c = m.attrib.get("c")
-                        ts = _ts_to_iso(m.attrib.get("ts"))
-                        ev_time = ct or ts
-                        row = (
-                            eva_number,
-                            station_name,
-                            ev_time,
-                            msg_id,
-                            t,
-                            None,
-                            None,
-                            int(c) if c is not None and str(c).isdigit() else None,
-                            None,
-                            None,
-                            cp,
-                            batch_id,
-                        )
-                        to_insert.append(row)
+                node = s.find(parent_tag)
+                if node is None:
+                    continue
+                msgs = node.findall("m")
+                last_m = msgs[-1] if msgs else None
+                msg_id = last_m.attrib.get("id") if last_m is not None else None
+                t = last_m.attrib.get("t") if last_m is not None else None
+                cat = None
+                pr = last_m.attrib.get("pr") if last_m is not None else None
+                ts = None
+                if last_m is not None:
+                    ts = _ts_to_iso(last_m.attrib.get("ts")) or _tts_to_iso(last_m.attrib.get("ts-tts"))
+                c = last_m.attrib.get("c") if last_m is not None else None
+                delay = int(c) if c is not None and str(c).isdigit() else None
+                row = (
+                    eva_number,
+                    station_name,
+                    train_name,
+                    dest,
+                    delay,
+                    ts,
+                    canceled,
+                    t,
+                    cat,
+                    int(pr) if pr is not None and str(pr).isdigit() else None,
+                    train_type,
+                    ride_id,
+                    line_num,
+                    ar_pt,
+                    ar_ct,
+                    dp_pt,
+                    dp_ct,
+                    msg_id,
+                    batch_id,
+                )
+                to_insert.append(row)
 
     if not to_insert:
         return 0
@@ -140,7 +215,7 @@ def insert_timetables_fchg_events_to_dwh(batch_id: str | None = None) -> int:
                 cur,
                 """
                 INSERT INTO dwh.timetables_fchg_events
-                (eva_number, station_name, event_time, message_id, type, category, priority, delay_minutes, valid_from, valid_to, platform_change, batch_id)
+                (eva_number, station_name, train_name, final_destination_station, delay_in_min, event_time, is_canceled, type, category, priority, train_type, train_line_ride_id, train_line_station_num, arrival_planned_time, arrival_change_time, departure_planned_time, departure_change_time, message_id, batch_id)
                 VALUES %s
                 """,
                 to_insert,
@@ -188,7 +263,7 @@ def insert_timetables_plan_events_to_dwh(batch_id: str | None = None) -> int:
             continue
         station_name = root.attrib.get("station")
         for s in root.findall("s"):
-            service_id = s.attrib.get("id")
+            train_line_ride_id = s.attrib.get("id")
             tl = s.find("tl")
             train_number = tl.attrib.get("n") if tl is not None else None
             train_category = tl.attrib.get("c") if tl is not None else None
@@ -203,7 +278,7 @@ def insert_timetables_plan_events_to_dwh(batch_id: str | None = None) -> int:
                     route_path = node.attrib.get("ppth")
                     key = (
                         station_name,
-                        service_id,
+                        train_line_ride_id,
                         train_number,
                         train_category,
                         train_type,
@@ -229,7 +304,7 @@ def insert_timetables_plan_events_to_dwh(batch_id: str | None = None) -> int:
                 cur,
                 """
                 INSERT INTO dwh.timetables_plan_events
-                (station_name, service_id, train_number, train_category, train_type, train_direction, event_type, event_time, platform, train_line_name, route_path, batch_id)
+                (station_name, train_line_ride_id, train_number, train_category, train_type, train_direction, event_type, event_time, platform, train_line_name, route_path, batch_id)
                 VALUES %s
                 """,
                 to_insert,
