@@ -97,7 +97,7 @@ def insert_forecast_verticalized_to_dwh(batch_id: str | None = None) -> int:
         with conn.cursor() as cur:
             psycopg2.extras.execute_values(
                 cur,
-                "INSERT INTO dwh.weather_forecast_vertical_raw (payload, batch_id) VALUES %s",
+                "INSERT INTO psa.weather_forecast_vertical_raw (payload, batch_id) VALUES %s",
                 rows_to_insert,
             )
     return len(rows_to_insert)
@@ -158,8 +158,7 @@ def insert_history_verticalized_to_dwh(batch_id: str | None = None) -> int:
         with conn.cursor() as cur:
             psycopg2.extras.execute_values(
                 cur,
-                "INSERT INTO dwh.weather_history_vertical_raw (payload, batch_id) VALUES %s",
+                "INSERT INTO psa.weather_history_vertical_raw (payload, batch_id) VALUES %s",
                 rows_to_insert,
             )
     return len(rows_to_insert)
-

@@ -55,7 +55,7 @@ Das System implementiert eine strikte Drei‑Schichten‑Architektur zur Trennun
 **Lösung**: Transformation in zeilenorientiertes Format
 - Jeder Index `i` in `hourly.time` wird zu einer eigenständigen Zeile
 - Alle korrespondierenden Messwerte am Index `i` werden in derselben Zeile gespeichert
-- Speicherung als JSONB in `dwh.weather_forecast_vertical_raw` und `dwh.weather_history_vertical_raw`
+- Speicherung als JSONB in `psa.weather_forecast_vertical_raw` und `psa.weather_history_vertical_raw`
 
 **Begründung**:
 - Standardisiertes, relationsfähiges Format
@@ -210,8 +210,8 @@ Das System implementiert eine strikte Drei‑Schichten‑Architektur zur Trennun
 
 **Data Warehouse**:
 - `dwh.stations`: Dimensionstabelle für Bahnhöfe
-- `dwh.weather_forecast_vertical_raw`: Vertikalisierte Vorhersagedaten (JSONB)
-- `dwh.weather_history_vertical_raw`: Vertikalisierte historische Daten (JSONB)
+- `psa.weather_forecast_vertical_raw`: Vertikalisierte Vorhersagedaten (JSONB)
+- `psa.weather_history_vertical_raw`: Vertikalisierte historische Daten (JSONB)
 
 **Views**:
 - `dwh.v_stations`: Angereicherte Stationsdimension
@@ -566,7 +566,7 @@ Le module `utils/db.py` sert désormais de façade légère et ré‑exporte des
 
 ### Datenzählungen
 - `SELECT COUNT(*) FROM psa.weather_forecast_raw;`
-- `SELECT COUNT(*) FROM dwh.weather_forecast_vertical_raw;`
+- `SELECT COUNT(*) FROM psa.weather_forecast_vertical_raw;`
 - `SELECT COUNT(*) FROM dwh.v_weather_forecast_hourly;`
 
 ### Duplikate prüfen
@@ -865,7 +865,7 @@ Cette table contient une version normalisée des événements issus du flux FCHG
 
 Transformation:
 - `station_name=Frankfurt(Main)Hbf`
-- `service_id=607522038288083186-2511081442-1`
+- `train_line_ride_id=607522038288083186-2511081442-1`
 - `train_number=15520`, `train_category=RB`
 - `event_type=dp`, `event_time=2025-11-08T14:42:00Z`, `platform=10`
 - `train_line_name=51`, `route_path='Frankfurt(Main)Süd|Hanau Hbf|...'`
@@ -873,7 +873,7 @@ Transformation:
 
 **Notes supplémentaires**
 - Le flux PLAN ne contient pas les heures modifiées (`ct`) ni les retards (`c`); ces champs proviennent des endpoints de changements (RCHG/FCHG).
-- Les doublons potentiels sur des combinaisons identiques (`station_name`, `service_id`, `event_type`, `event_time`, `platform`, `train_line_name`, `route_path`, `batch_id`) sont filtrés côté transformation par ensemble en mémoire pour éviter l’insertion multiple.
+- Les doublons potentiels sur des combinaisons identiques (`station_name`, `train_line_ride_id`, `event_type`, `event_time`, `platform`, `train_line_name`, `route_path`, `batch_id`) sont filtrés côté transformation par ensemble en mémoire pour éviter l’insertion multiple.
 ### Pipeline RCHG (FR)
 
 **Introduction et contexte**
