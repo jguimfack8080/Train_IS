@@ -393,6 +393,13 @@ LIMIT 1;
 3. `purge_stg_weather`: Bereinigung STG
 4. `transform_forecast_to_dwh`: Vertikalisierung und Speicherung in DWH mit Idempotenzprüfung
 
+### Änderungen und Updates (Timetables & DWH)
+Zur besseren analytischen Nutzung der Fahrplandaten wurden folgende Änderungen implementiert:
+- FCHG‑Transformation (DWH): Die Ereignistabelle nutzt jetzt `eva_number` als Stationskennung und ist vollständig dokumentiert (Spaltenkommentare). Pro Meldung wird eine Zeile mit Zeit, Typ, Kategorie, Priorität, Verspätung und Bahnsteigwechsel erzeugt.
+- PLAN‑Transformation (DWH): Neuer Speicherpfad für planmäßige Abfahrts‑/Ankunftsereignisse in `dwh.timetables_plan_events` mit den Feldern Stationsname, Service‑ID, Zugnummer, Zuggattung, Typ, Richtung, Ereignistyp (`dp/ar`), Zeit, Gleis, `train_line_name`, Route und Batch. Der DAG `db_timetables_plan_import` führt die Transformation automatisch nach der Ingestion aus.
+- Idempotenz und Logging: Beide Transformationen protokollieren `success/skipped` in `metadata.process_log` und verhindern doppelte Einfügungen.
+- Indizes: Selektive Indizes auf Station und Zeit wurden ergänzt, um typische Abfragen (Fenster, Bahnhof) zu beschleunigen.
+
 **Besonderheit**: Transformation ist integriert; bereits verarbeitete Batches werden als `skipped` protokolliert
 
 ### `open_meteo_archive_import`
@@ -698,4 +705,45 @@ HAVING COUNT(*) > 1;
 ### Retries und Robustheit
 **Airflow‑Retries**: Automatisch bei transienten Fehlern
 
-**Idempotenz**: Schützt
+**Idempotenz**: Schützt## Timetables FCHG  DWH-Transformation
+- DWH-Tabelle: dwh.timetables_fchg_events (EVA-basiert).
+- Felder: eva_number, station_name, event_time (ct bevorzugt, sonst ts), message_id, 	ype (d/f/h), category, priority, delay_minutes, alid_from, alid_to, platform_change, atch_id.
+- Im DAG db_timetables_fchg_import wird 	ransform_fchg_to_dwh am Ende ausgef�hrt.
+# Table DWH `timetables_fchg_events`
+
+Cette table contient une version normalisée des événements issus du flux FCHG de la Deutsche Bahn pour chaque gare (EVA). Elle est alimentée à la fin du DAG `dimport_db_timetables_fchg_import` par une transformation qui parse les XML bruts stockés dans PSA.
+
+## Attributs et sémantique
+
+- **eva_number** : identifiant EVA unique de la gare (source : attribut `eva` de la racine `<timetable>`).  
+- **station_name** : nom de la gare (source : attribut `station` de la racine `<timetable>`).  
+- **event_time** : horodatage de l’événement. Priorité au champ `ct` du parent `<ar>/<dp>` lorsqu’il existe (heure calculée côté DB), sinon `ts` du message `<m>`. Stocké avec timezone pour une interprétation fiable.  
+- **message_id** : identifiant unique du message `<m>`. Permet la traçabilité fine et le regroupement.  
+- **type** : type d’événement tel que fourni par l’API (`d` pour départ, `f` pour arrivée, `h` pour information). Les autres types éventuels sont conservés tels quels.  
+- **category** : catégorie métier de la notification lorsque disponible au niveau `<s>` (ex. `Störung` pour incident, `Information`). Les messages sous `<ar>/<dp>` n’incluent pas de catégorie (champ vide).  
+- **priority** : priorité (`pr`) de la notification, si fournie par l’API.  
+- **delay_minutes** : code de retard (`c`) en minutes issu des messages `<ar>` et `<dp>`. Vide pour les messages de type `h`.  
+- **valid_from** : début de validité (`from`) d’une information ou d’un incident (messages de type `h`). Stocké avec timezone.  
+- **valid_to** : fin de validité (`to`) d’une information ou d’un incident (messages de type `h`). Stocké avec timezone.  
+- **platform_change** : indicateur de changement de quai/voie (`cp`) présent sur `<ar>/<dp>` lorsqu’applicable.  
+- **batch_id** : identifiant de lot du run ETL ; sert à l’idempotence et à l’audit (lié à `metadata.process_log`).  
+- **inserted_at** : timestamp d’insertion en DWH.
+
+## Règles de peuplement et transformation
+
+- Une ligne est créée par message `<m>` rencontré dans le XML.  
+- Les timestamps bruts (format `YYMMDDHHMM`) sont convertis en datetimes standards.  
+- La transformation ne modifie pas les payloads PSA ; elle lit depuis `psa.timetables_fchg_raw` et écrit uniquement dans `dwh.timetables_fchg_events`.  
+- La transformation est idempotente : un batch déjà transformé est marqué `skipped` dans `metadata.process_log` et n’est pas réinséré.
+
+## Index et performance
+
+- Index sur **eva_number** pour les requêtes par gare.  
+- Index sur **event_time** pour les fenêtres temporelles.  
+- Index sur **category** pour filtrer rapidement les incidents.
+
+## Utilisation analytique
+
+- **Analyse des incidents ferroviaires** : filtrer `type = 'h'` et `category = 'Störung'`.  
+- **Suivi des retards** : filtrer `type IN ('d','f')` et `delay_minutes IS NOT NULL`.  
+- **Agrégations par gare et par heure** : compter les événements, calculer des indicateurs (retard moyen, volume d’incidents), préparer des features pour le machine learning.

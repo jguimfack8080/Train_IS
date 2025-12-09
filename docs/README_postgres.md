@@ -20,6 +20,13 @@
 - `psa.*` – persistente Kopien der Rohdaten.
 - `dwh.stations` – bereinigte Stationsdaten mit Koordinaten.
 - `dwh.weather_hourly` – aufbereitete Wetterzeitreihen.
+- `dwh.timetables_fchg_events` – transformierte Ereignisse aus FCHG (EVA‑basiert; eine Zeile je Ereignis mit `eva_number`, `station_name`, `event_time`, `type`, `category`, `priority`, `delay_minutes`, `valid_from`, `valid_to`, `platform_change`, `batch_id`).
+- `dwh.timetables_plan_events` – transformierte PLAN‑Ereignisse (eine Zeile je Abfahrt/Ankunft; Felder: `station_name`, `service_id`, `train_number`, `train_category`, `train_type`, `train_direction`, `event_type`, `event_time`, `platform`, `train_line_name`, `route_path`, `batch_id`).
+
+## Änderungen und Updates
+- DWH FCHG: Umstellung auf `eva_number` als Stationsschlüssel; ausführliche Spaltenkommentare hinzugefügt (Beschreibung, Herkunft, Typen).
+- DWH PLAN: Neue Tabelle `dwh.timetables_plan_events` zur Speicherung planmäßiger Ereignisse; Indizes auf Station und Zeit; Spaltenkommentare in SQL ergänzt.
+- Indizes: Ergänzung/Anpassung für schnelle Filterung nach Station, Zeit und Kategorie in Timetables‑Tabellen.
 
 ## Zugriff aus Airflow
 - Verbindungsparameter via Umgebungsvariablen `DATA_DB_*`.
