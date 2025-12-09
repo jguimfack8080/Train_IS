@@ -40,6 +40,8 @@
   - `message_id`, `type` (`d`/`f`/`h`), `category` (z. B. `Störung`, `Information`), `priority`
   - `delay_minutes` (`c`), `valid_from`/`valid_to` (`from`/`to`), `platform_change` (`cp`)
   - `batch_id`
+- Transformation (PLAN): Aufgabe `transform_plan_to_dwh` schreibt planmäßige Ereignisse in `dwh.timetables_plan_events` (Felder: `station_name`, `service_id`, `train_number`, `train_category`, `train_type`, `train_direction`, `event_type`, `event_time`, `platform`, `train_line_name`, `route_path`, `batch_id`).
+- Transformation (RCHG): Aufgabe `transform_rchg_to_dwh` schreibt jüngste Änderungen nach `dwh.timetables_rchg_events` mit Deduplikation (`event_hash`) und Feldern: `event_id`, `eva_number`, `station_name`, `message_id`, `event_type` (`m`/`dp`/`ar`), `category`, `change_type`, `priority`, `valid_from`, `valid_to`, `old_time`, `new_time`, `delay_minutes`, `platform`, `platform_change`, `route`, `train_line_name`, `timestamp_event` (Prio: `ct` → `ts` → NOW), `batch_id`.
 
 ## Umgebungsvariablen
 - `DB_CLIENT_ID`, `DB_API_KEY` – Deutsche Bahn API Credentials.
@@ -116,4 +118,5 @@ In den Timetables‑Pipelines wurden folgende Aktualisierungen vorgenommen, um A
 - FCHG‑Transformation: Die DWH‑Tabelle verwendet jetzt das Stationsfeld `eva_number` anstelle von `station_id`. Die Aufgabe `transform_fchg_to_dwh` erzeugt pro Meldung eine Zeile mit Zeit, Typ, Kategorie, Priorität, Verspätung und Bahnsteigwechsel.
 - PLAN‑Transformation: Der DAG `db_timetables_plan_import` wurde erweitert um die Aufgabe `transform_plan_to_dwh`. Diese schreibt planmäßige Abfahrts‑/Ankunftsereignisse (Felder: Stationsname, Service‑ID, Zugnummer, Zuggattung, Typ, Richtung, Ereignistyp `dp/ar`, Zeit, Gleis, `train_line_name`, Route, Batch) in `dwh.timetables_plan_events`.
 - Idempotenz: Beide Transformationen protokollieren ihren Erfolg in `metadata.process_log` und überspringen bereits verarbeitete Batches.
+ - Deduplikation: RCHG setzt zusätzlich einen eindeutigen Hash pro Ereignis, Konflikte werden beim Insert ignoriert (`ON CONFLICT DO NOTHING`).
 - Indizes: Selektive Indizes auf Zeit und Station verbessern die Abfrageleistung in den neuen Tabellen.
