@@ -417,3 +417,88 @@ CREATE INDEX IF NOT EXISTS idx_dwh_weather_history_vertical_raw_batch_id ON dwh.
 CREATE INDEX IF NOT EXISTS idx_dwh_timetables_fchg_events_eva_number ON dwh.timetables_fchg_events(eva_number);
 CREATE INDEX IF NOT EXISTS idx_dwh_timetables_fchg_events_time ON dwh.timetables_fchg_events(event_time);
 CREATE INDEX IF NOT EXISTS idx_dwh_timetables_fchg_events_category ON dwh.timetables_fchg_events(category);
+
+-- Timetables PLAN événements transformés
+CREATE TABLE IF NOT EXISTS dwh.timetables_plan_events (
+  id BIGSERIAL PRIMARY KEY,
+  station_name TEXT,
+  service_id TEXT,
+  train_number TEXT,
+  train_category TEXT,
+  train_type TEXT,
+  train_direction TEXT,
+  event_type TEXT,
+  event_time TIMESTAMPTZ,
+  platform TEXT,
+  train_line_name TEXT,
+  route_path TEXT,
+  batch_id TEXT,
+  inserted_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_dwh_timetables_plan_events_station ON dwh.timetables_plan_events(station_name);
+CREATE INDEX IF NOT EXISTS idx_dwh_timetables_plan_events_time ON dwh.timetables_plan_events(event_time);
+
+COMMENT ON TABLE dwh.timetables_plan_events IS 'Transformierte Plan-Ereignisse aus DB Timetables PLAN (XML); eine Zeile je Abfahrt/Ankunft';
+COMMENT ON COLUMN dwh.timetables_plan_events.station_name IS 'Stationsname aus <timetable station="...">';
+COMMENT ON COLUMN dwh.timetables_plan_events.service_id IS 'Dienst-/Fahrt-Identifikator (<s id="...">)';
+COMMENT ON COLUMN dwh.timetables_plan_events.train_number IS 'Zugnummer (<tl n="...">)';
+COMMENT ON COLUMN dwh.timetables_plan_events.train_category IS 'Zuggattung (z. B. ICE, RE) (<tl c="...">)';
+COMMENT ON COLUMN dwh.timetables_plan_events.train_type IS 'Zugtyp/Betriebsart (<tl t="...">)';
+COMMENT ON COLUMN dwh.timetables_plan_events.train_direction IS 'Richtungshinweis (<tl f="...">)';
+COMMENT ON COLUMN dwh.timetables_plan_events.event_type IS 'Ereignistyp: dp=Abfahrt, ar=Ankunft (Knotentyp)';
+COMMENT ON COLUMN dwh.timetables_plan_events.event_time IS 'Planzeit des Ereignisses (pt) als TIMESTAMPTZ';
+COMMENT ON COLUMN dwh.timetables_plan_events.platform IS 'Gleis/Bahnsteig (pp)';
+
+COMMENT ON COLUMN dwh.timetables_plan_events.route_path IS 'Route/Stationsfolge (ppth)';
+COMMENT ON COLUMN dwh.timetables_plan_events.batch_id IS 'Logische Batch-ID des Pipeline-Laufs (Nachverfolgbarkeit)';
+COMMENT ON COLUMN dwh.timetables_plan_events.inserted_at IS 'Zeitpunkt der Einfügung in das DWH (Serverzeit)';
+-- Timetables RCHG événements transformés
+CREATE TABLE IF NOT EXISTS dwh.timetables_rchg_events (
+  id BIGSERIAL PRIMARY KEY,
+  event_id TEXT,
+  eva_number TEXT,
+  station_name TEXT,
+  message_id TEXT,
+  event_type TEXT,
+  category TEXT,
+  change_type TEXT,
+  priority INT,
+  valid_from TIMESTAMPTZ,
+  valid_to TIMESTAMPTZ,
+  old_time TIMESTAMPTZ,
+  new_time TIMESTAMPTZ,
+  delay_minutes INT,
+  platform TEXT,
+  platform_change TEXT,
+  route TEXT,
+  train_line_name TEXT,
+  timestamp_event TIMESTAMPTZ,
+  batch_id TEXT,
+  event_hash TEXT,
+  inserted_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_dwh_timetables_rchg_event_hash ON dwh.timetables_rchg_events(event_hash);
+CREATE INDEX IF NOT EXISTS idx_dwh_timetables_rchg_events_time ON dwh.timetables_rchg_events(timestamp_event);
+CREATE INDEX IF NOT EXISTS idx_dwh_timetables_rchg_events_eva ON dwh.timetables_rchg_events(eva_number);
+COMMENT ON TABLE dwh.timetables_rchg_events IS 'Transformierte Ereignisse aus DB Timetables RCHG (Recent Changes, XML); eine Zeile je Nachricht oder Knotenänderung (m/ar/dp) mit normalisierten Zeitstempeln und eindeutiger Deduplikation über event_hash.';
+COMMENT ON COLUMN dwh.timetables_rchg_events.event_id IS 'Ereignis-/Knoten‑ID aus <s id="..."> (lokaler Knotenschlüssel im Timetable).';
+COMMENT ON COLUMN dwh.timetables_rchg_events.eva_number IS 'EVA‑Nummer des Bahnhofs aus <timetable eva="..."> (eindeutiger Stationsschlüssel).';
+COMMENT ON COLUMN dwh.timetables_rchg_events.station_name IS 'Stationsname aus <timetable station="...">.';
+COMMENT ON COLUMN dwh.timetables_rchg_events.message_id IS 'Nachrichten‑ID aus <m id="...">; NULL bei Knoten‑Ereignissen ohne Nachricht.';
+COMMENT ON COLUMN dwh.timetables_rchg_events.event_type IS 'Ereignistyp: m=Nachricht, dp=Abfahrt, ar=Ankunft.';
+COMMENT ON COLUMN dwh.timetables_rchg_events.category IS 'Kategorie der Nachricht (<m cat="...">), z. B. Information, Störung, Bauarbeiten.';
+COMMENT ON COLUMN dwh.timetables_rchg_events.change_type IS 'Änderungstyp der Nachricht (<m t="...">), z. B. h/d/etc.';
+COMMENT ON COLUMN dwh.timetables_rchg_events.priority IS 'Priorität der Nachricht (<m pr="...">) falls vorhanden.';
+COMMENT ON COLUMN dwh.timetables_rchg_events.valid_from IS 'Gültigkeitsbeginn (<m from>) als TIMESTAMPTZ (ISO).';
+COMMENT ON COLUMN dwh.timetables_rchg_events.valid_to IS 'Gültigkeitsende (<m to>) als TIMESTAMPTZ (ISO).';
+COMMENT ON COLUMN dwh.timetables_rchg_events.old_time IS 'Vorherige Zeit (<dp/ar pt>) als TIMESTAMPTZ (ISO), wenn vorhanden.';
+COMMENT ON COLUMN dwh.timetables_rchg_events.new_time IS 'Neue Zeit (<dp/ar ct>) als TIMESTAMPTZ (ISO), wenn vorhanden.';
+COMMENT ON COLUMN dwh.timetables_rchg_events.delay_minutes IS 'Verspätung in Minuten (<m c>) falls angegeben.';
+COMMENT ON COLUMN dwh.timetables_rchg_events.platform IS 'Gleis/Bahnsteig (<dp/ar pp>) falls vorhanden.';
+COMMENT ON COLUMN dwh.timetables_rchg_events.platform_change IS 'Bahnsteigwechsel (<dp/ar cp>) falls vorhanden.';
+COMMENT ON COLUMN dwh.timetables_rchg_events.route IS 'Route/Stationsfolge (<dp/ar ppth>) falls vorhanden.';
+COMMENT ON COLUMN dwh.timetables_rchg_events.train_line_name IS 'Linienname (<dp/ar l>), z. B. RB12/RE85.';
+COMMENT ON COLUMN dwh.timetables_rchg_events.timestamp_event IS 'Ereigniszeit: Präferenz ct (<dp/ar>), sonst ts (<m>), Fallback NOW() UTC (ISO).';
+COMMENT ON COLUMN dwh.timetables_rchg_events.batch_id IS 'Logische Batch‑ID des Pipeline‑Laufs (Nachverfolgbarkeit).';
+COMMENT ON COLUMN dwh.timetables_rchg_events.event_hash IS 'Deterministischer Hash aus Schlüsselfeldern zur Deduplikation; eindeutiger Index verhindert Duplikate.';
+COMMENT ON COLUMN dwh.timetables_rchg_events.inserted_at IS 'Zeitpunkt der Einfügung in das DWH (Serverzeit).';

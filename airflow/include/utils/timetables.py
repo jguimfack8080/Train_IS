@@ -145,3 +145,43 @@ def transform_fchg_events_to_dwh() -> Dict[str, int]:
 
 def task_transform_fchg_events_to_dwh(**_context):
     return transform_fchg_events_to_dwh()
+
+
+def transform_plan_events_to_dwh() -> Dict[str, int]:
+    batch_id = db_utils._get_latest_batch_id("psa.timetables_plan_raw")
+    if batch_id is None:
+        return {"rows_inserted": 0, "batch_id": None}
+    if db_utils.is_batch_processed("db_timetables_plan_transform", batch_id):
+        return {"rows_inserted": 0, "batch_id": batch_id, "skipped": 1}
+    process_id = db_utils.log_process_start(process_name="db_timetables_plan_transform", batch_id=batch_id)
+    try:
+        inserted = db_utils.insert_timetables_plan_events_to_dwh(batch_id=batch_id)
+        db_utils.log_process_end(process_id=process_id, status="success", message=f"rows_inserted={inserted}")
+        return {"rows_inserted": inserted, "batch_id": batch_id}
+    except Exception as exc:
+        db_utils.log_process_end(process_id=process_id, status="failed", message=str(exc))
+        raise
+
+
+def task_transform_plan_events_to_dwh(**_context):
+    return transform_plan_events_to_dwh()
+
+
+def transform_rchg_events_to_dwh() -> Dict[str, int]:
+    batch_id = db_utils._get_latest_batch_id("psa.timetables_rchg_raw")
+    if batch_id is None:
+        return {"rows_inserted": 0, "batch_id": None}
+    if db_utils.is_batch_processed("db_timetables_rchg_transform", batch_id):
+        return {"rows_inserted": 0, "batch_id": batch_id, "skipped": 1}
+    process_id = db_utils.log_process_start(process_name="db_timetables_rchg_transform", batch_id=batch_id)
+    try:
+        inserted = db_utils.insert_timetables_rchg_events_to_dwh(batch_id=batch_id)
+        db_utils.log_process_end(process_id=process_id, status="success", message=f"rows_inserted={inserted}")
+        return {"rows_inserted": inserted, "batch_id": batch_id}
+    except Exception as exc:
+        db_utils.log_process_end(process_id=process_id, status="failed", message=str(exc))
+        raise
+
+
+def task_transform_rchg_events_to_dwh(**_context):
+    return transform_rchg_events_to_dwh()

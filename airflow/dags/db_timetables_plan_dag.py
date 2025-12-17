@@ -10,7 +10,7 @@ INCLUDE_PATH = "/opt/airflow/include"
 if INCLUDE_PATH not in sys.path:
     sys.path.append(INCLUDE_PATH)
 
-from utils.timetables import ingest_plan
+from utils.timetables import ingest_plan, task_transform_plan_events_to_dwh
 from utils.date_utils import to_tz
 
 
@@ -71,4 +71,6 @@ with DAG(
     default_args=default_args,
     tags=["deutsche-bahn", "timetables", "plan"],
 ) as dag:
-    PythonOperator(task_id="import_plan_day_and_next_morning", python_callable=run_plan_window, provide_context=True)
+    import_plan = PythonOperator(task_id="import_plan_day_and_next_morning", python_callable=run_plan_window, provide_context=True)
+    transform_plan = PythonOperator(task_id="transform_plan_to_dwh", python_callable=task_transform_plan_events_to_dwh, provide_context=True)
+    import_plan >> transform_plan
