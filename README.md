@@ -393,11 +393,90 @@ LIMIT 1;
 3. `purge_stg_weather`: Bereinigung STG
 4. `transform_forecast_to_dwh`: Vertikalisierung und Speicherung in DWH mit Idempotenzprüfung
 
-### Änderungen und Updates (Timetables & DWH)
+### Pipeline FCHG (FR)
+
+**Introduction et contexte**
+- Objectif: transformer le flux XML FCHG (Full CHanGes) de Deutsche Bahn en données analytiques dans `dwh.timetables_fchg_events`.
+- Source: XML brut du Timetables API (`/fchg`) stocké en `stg.timetables_fchg_raw` puis copié en `psa.timetables_fchg_raw`.
+- But: produire une ligne par événement (message ou changement d’arrivée/départ) enrichie des attributs clés pour l’analyse métier (retards, annulations, ligne, destination, timestamps).
+
+**Structure du pipeline**
+- Ingestion: pour chaque EVA de Brême, appel API `/fchg` → insertion du XML brut (`TEXT`) en STG → copie vers PSA → purge STG.
+- Transformation: lecture du XML PSA → parcours des balises `<s>`, `<tl>`, `<m>`, `<ar>`, `<dp>` → extraction/normalisation → insertion bulk (`execute_values`) dans `dwh.timetables_fchg_events`.
+- Idempotence & résilience: parsing sécurisé par nœud; un payload invalide est ignoré sans interrompre le lot; la transformation conserve la `batch_id`.
+
+**Signification des attributs (colonne → extraction → rôle)**
+- `eva_number` → racine `<timetable eva="...">` → identifiant EVA de la gare.
+- `station_name` → racine `<timetable station="...">` → libellé de la gare.
+- `train_line_ride_id` → `<s id="...">` → identifiant de course (service/arrêt).
+- `train_name` → `<ar l="...">` ou `<dp l="...">` → ligne commerciale (RS1/RS2, etc.).
+- `train_type` → `<tl c="...">` si présent → catégorie/gamme (RB/RE/S, etc.).
+- `final_destination_station` → dernier élément de `ppth|cpth` sur `<ar>` ou `<dp>` → terminus prévu.
+- `arrival_planned_time` → `<ar pt>` (YYMMDDHHMM) → heure d’arrivée prévue, normalisée ISO.
+- `arrival_change_time` → `<ar ct>` → heure d’arrivée modifiée, ISO.
+- `departure_planned_time` → `<dp pt>` → heure de départ prévue, ISO.
+- `departure_change_time` → `<dp ct>` → heure de départ modifiée, ISO.
+- `event_time` → pour `<m>` sous `<ar>/<dp>`: `m@ts` (fallback `m@ts-tts`) en ISO; pour `<m>` sous `<s>`: `m@ts` (fallback `ts-tts`).
+- `delay_in_min` → `m@c` si numérique → retard en minutes.
+- `is_canceled` → `True` si au moins un `<m>` sous `<ar>/<dp>` a `t="f"` et `c>0`; sinon `False`.
+- `type` → `m@t` → type de message (p.ex. f, d, h).
+- `category` → `m@cat` → catégorie du message.
+- `priority` → `m@pr` → priorité éventuelle.
+- `message_id` → `m@id` → identifiant du message.
+- `batch_id` → identifiant de lot propagé (traçabilité).
+- `inserted_at` → timestamp d’insertion (DB, `DEFAULT NOW()`).
+
+**Logique métier appliquée**
+- Retard (`delay_in_min`): convertit `m@c` en entier si présent; absent → `NULL`.
+- Annulation (`is_canceled`): vraie si `t="f"` et `c>0` détecté sur n’importe quel `<m>` de `<ar>` ou `<dp>`.
+- Ligne (`train_name`): prend `l` du nœud `<ar>` sinon `<dp>` pour refléter RS1/RS2; ne dépend pas de `<tl n>`.
+- Identifiant de course (`train_line_ride_id`): toujours `s@id`.
+- Types/ catégories/priorités: directement des attributs `m@t`, `m@cat`, `m@pr`.
+- Timestamps: 
+  - Format compact `YYMMDDHHMM` → `YYYY-MM-DDTHH:MM:SSZ`.
+  - `ts-tts` (si présent) → ISO 8601 `YYYY-MM-DDTHH:MM:SSZ`.
+  - Priorité temporelle pour événements `<ar>/<dp>`: `m@ts` (ou `ts-tts`) du dernier `<m>`.
+
+**Exemples concrets**
+XML abrégé:
+
+```xml
+<timetable station="Bremen Hbf" eva="8000013">
+  <s id="12345">
+    <tl c="RB" />
+    <ar pt="2503110900" ct="2503110912" l="RS1" ppth="Oldenburg|Delmenhorst|Bremen Hbf" />
+    <m id="M1" t="h" cat="info" pr="1" ts="2503110855" />
+    <dp pt="2503110920" ct="2503110925" l="RS1">
+      <m id="M2" t="f" c="5" ts="2503110918" />
+    </dp>
+  </s>
+  <s id="67890">
+    <dp pt="2503111000" l="RS2">
+      <m id="M3" t="h" c="0" ts="2503110958" />
+    </dp>
+  </s>
+  </timetable>
+```
+
+Transformations clés:
+- Ligne 1 (`<m>` sous `<s>`):
+  - `train_line_ride_id=12345`, `train_name=RS1`, `train_type=RB`, `final_destination_station=Bremen Hbf`, `arrival_planned_time=...0900Z`, `arrival_change_time=...0912Z`, `event_time=...0855Z`, `delay_in_min=NULL`, `is_canceled=False`, `message_id=M1`, `type=h`, `category=info`, `priority=1`.
+- Ligne 2 (`<m>` sous `<dp>`):
+  - `train_line_ride_id=12345`, `train_name=RS1`, `train_type=RB`, `final_destination_station=Bremen Hbf`, `departure_planned_time=...0920Z`, `departure_change_time=...0925Z`, `event_time=...0918Z`, `delay_in_min=5`, `is_canceled=True` (car `t=f` et `c>0`), `message_id=M2`, `type=f`.
+- Ligne 3 (`<m>` sous `<dp>` du second `<s>`):
+  - `train_line_ride_id=67890`, `train_name=RS2`, `train_type=NULL`, `final_destination_station=NULL` (pas de `ppth/cpth`), `departure_planned_time=...1000Z`, `event_time=...0958Z`, `delay_in_min=0`, `is_canceled=False`, `message_id=M3`, `type=h`.
+
+**Notes supplémentaires**
+- Robustesse parsing: un XML invalide est ignoré; le lot continue.
+- Types numériques: `train_line_station_num` est rempli si `l` est numérique; sinon `NULL`.
+- Timezone: timestamps normalisés en UTC (`Z`).
+- Insertion: bulk via `psycopg2.extras.execute_values` pour performance.
+- Traçabilité: `batch_id` et `metadata.api_call_log`/`metadata.process_log` assurent l’audit.
 Zur besseren analytischen Nutzung der Fahrplandaten wurden folgende Änderungen implementiert:
 - FCHG‑Transformation (DWH): Die Ereignistabelle nutzt jetzt `eva_number` als Stationskennung und ist vollständig dokumentiert (Spaltenkommentare). Pro Meldung wird eine Zeile mit Zeit, Typ, Kategorie, Priorität, Verspätung und Bahnsteigwechsel erzeugt.
 - PLAN‑Transformation (DWH): Neuer Speicherpfad für planmäßige Abfahrts‑/Ankunftsereignisse in `dwh.timetables_plan_events` mit den Feldern Stationsname, Service‑ID, Zugnummer, Zuggattung, Typ, Richtung, Ereignistyp (`dp/ar`), Zeit, Gleis, `train_line_name`, Route und Batch. Der DAG `db_timetables_plan_import` führt die Transformation automatisch nach der Ingestion aus.
  - RCHG‑Transformation (DWH): Jüngste Änderungen (`m/ar/dp`) werden in `dwh.timetables_rchg_events` gespeichert. Eine Zeile je Ereignis mit klaren Feldern (Ereignis‑ID, EVA, Station, Nachricht/Typ/Kategorie/Änderungstyp/Priorität, Gültigkeiten, alte/neue Zeit, Verspätung, Gleis/Wechsel, Route, `train_line_name`, Ereigniszeit, Batch) und garantierter Deduplikation über `event_hash`. Der DAG `db_timetables_rchg_import` führt die Transformation direkt nach der Ingestion aus.
+ - RCHG‑Schema‑Anpassung: Entfernung der Felder `train_number`, `train_category`, `train_type`, `train_direction`; Feld `train_line_name` bleibt erhalten (Anforderung Fachlogik).
 - Idempotenz und Logging: Beide Transformationen protokollieren `success/skipped` in `metadata.process_log` und verhindern doppelte Einfügungen.
 - Indizes: Selektive Indizes auf Station und Zeit wurden ergänzt, um typische Abfragen (Fenster, Bahnhof) zu beschleunigen.
 
@@ -433,27 +512,21 @@ Zur besseren analytischen Nutzung der Fahrplandaten wurden folgende Änderungen 
 - `fetch_open_meteo_forecast`: URL‑Bau mit gerundeten Koordinatenlisten; Timeout und JSON‑Parsing
 - `fetch_open_meteo_archive`: Analog zu Forecast mit `start_date`, `end_date` und `hourly`‑Parametern
 
-### `utils/db.py`
-**Verbindungen**: Parameter aus ENV; `get_connection()` zentralisiert `psycopg2.connect`
+### Refactorisation des utilitaires DB
+Le module `utils/db.py` sert désormais de façade légère et ré‑exporte des fonctions depuis des modules spécialisés. Ceci améliore la lisibilité, supprime les doublons et maintient la compatibilité des imports existants.
 
-**Basisfunktionen**:
-- `insert_json`: Fügt 1 Zeile pro JSON‑Element ein; unterstützt `batch_id`
-- `insert_text`: Fügt rohen Text (z. B. Timetables‑XML) direkt in `TEXT`‑Spalten ein; unterstützt `batch_id`
- - `log_api_call`: Parameter als JSONB; HTTP‑Status, Antwortzeit; robuste Ergebniszählung (Antworten mit `results` oder direkter Liste)
-- `log_process_start/end`: Prozess‑Lifecycle in `metadata.process_log`
+**Modules introduits**:
+- `utils/db_conn.py`: paramètres de connexion DB via ENV; `get_connection()` centralisé
+- `utils/db_insert.py`: `insert_json`, `insert_text` (insertion bulk, support `batch_id`)
+- `utils/db_logs.py`: `log_api_call`, `log_process_start`, `log_process_end`, `is_batch_processed`
+- `utils/db_batch.py`: `_get_latest_batch_id`, `get_latest_forecast_batch_id`, `get_latest_history_batch_id`, `get_last_archive_end_date`
+- `utils/db_stg_psa.py`: `copy_*` et `purge_*` pour Stations, Forecast, Archive, Timetables (STG → PSA)
+- `utils/weather_transform.py`: `insert_forecast_verticalized_to_dwh`, `insert_history_verticalized_to_dwh`, mapping station (tolérance 1e‑4)
 
-**Schicht‑Transfer**:
-- `copy_*` und `purge_*` für Stationen, Vorhersage, Archiv (STG ↔ PSA)
-
-**Batch‑Helfer**:
-- `_get_latest_batch_id`, `get_latest_forecast_batch_id`, `get_latest_history_batch_id`
-- `is_batch_processed`: Idempotenzprüfung für Transformationen
- - `get_last_archive_end_date`: Liefert das letzte genutzte `end_date` für Archive aus `metadata.api_call_log`
-
-**DWH‑Vertikalisierung**:
-- `insert_forecast_verticalized_to_dwh`, `insert_history_verticalized_to_dwh`
- - **Station‑Mapping**: `_load_stations_for_mapping` lädt ausschließlich Bremer Stationen (Filter `name LIKE 'Brem%'`, `REPLACE(ds100, '"', '') LIKE 'HB%'`) und `_match_station_id` (Toleranz 1e‑4; Fallback auf nächsten Punkt nach euklidischer Distanz)
-- **Batch‑Insert**: `psycopg2.extras.execute_values` für Performance
+**Façade `utils/db.py`**:
+- Expose toutes les fonctions ci‑dessus pour compatibilité (`from utils import db as db_utils`)
+- Conserve les transformations Timetables vers DWH: `insert_timetables_fchg_events_to_dwh`, `insert_timetables_plan_events_to_dwh`, `insert_timetables_rchg_events_to_dwh`
+- Continue d’utiliser les inserts en masse (`psycopg2.extras.execute_values`) et l’idempotence via `metadata.process_log`
 
 ---
 
@@ -748,3 +821,120 @@ Cette table contient une version normalisée des événements issus du flux FCHG
 - **Analyse des incidents ferroviaires** : filtrer `type = 'h'` et `category = 'Störung'`.  
 - **Suivi des retards** : filtrer `type IN ('d','f')` et `delay_minutes IS NOT NULL`.  
 - **Agrégations par gare et par heure** : compter les événements, calculer des indicateurs (retard moyen, volume d’incidents), préparer des features pour le machine learning.
+### Pipeline PLAN (FR)
+
+**Introduction et contexte**
+- Objectif: transformer le flux XML PLAN (horaires planifiés) en événements normalisés dans `dwh.timetables_plan_events` pour l’analyse des départs/arrivées planifiés.
+- Source: XML brut du Timetables API (`/plan`) stocké en `stg.timetables_plan_raw` puis copié en `psa.timetables_plan_raw`.
+
+**Structure du pipeline**
+- Ingestion: sélection des EVA (Brême) → appels `/plan` par heure → stockage du XML brut `TEXT` en STG → copie vers PSA → purge STG.
+- Transformation: parcours `<s>`, `<tl>`, `<dp>`, `<ar>` → extraction des attributs métier → insertion bulk dans `dwh.timetables_plan_events`.
+
+**Signification des attributs (colonne → extraction → rôle)**
+- `station_name` → `<timetable station>` → libellé de la gare.
+ - `train_line_ride_id` → `<s id>` → identifiant de course/arrêt.
+- `train_number` → `<tl n>` → numéro commercial du train.
+- `train_category` → `<tl c>` → catégorie (ICE/RE/RB/S, etc.).
+- `train_type` → `<tl t>` → type/opérateur.
+- `train_direction` → `<tl f>` → direction (origine/destination indicative).
+- `event_type` → balise parente: `dp` (départ) ou `ar` (arrivée).
+- `event_time` → `<dp|ar pt>` (YYMMDDHHMM) → converti en ISO 8601.
+- `platform` → `<dp|ar pp>` → quai/voie.
+- `train_line_name` → `<dp|ar l>` → ligne (ex. 51/RS1/RS2), utile pour cartographie commerciale.
+- `route_path` → `<dp|ar ppth>` → chaîne des stations (séparateur `|`).
+- `batch_id` → identifiant de lot propagé.
+- `inserted_at` → timestamp d’insertion DB.
+
+**Logique métier appliquée**
+- Un enregistrement par événement `dp` ou `ar`.
+- Les informations `<tl>` servent de contexte (numéro, catégorie, type, direction) et sont représentées une fois par service, copiées pour chaque événement `dp/ar`.
+- `train_line_name` est systématiquement extrait du nœud événement (`l`), garantissant la correspondance avec la ligne affichée en gare.
+- Timestamps: format `YYMMDDHHMM` transformé en ISO (`YYYY-MM-DDTHH:MM:SSZ`).
+
+**Exemple concret (extrait de plan.xml)**
+
+```xml
+<timetable station='Frankfurt(Main)Hbf'>
+  <s id="607522038288083186-2511081442-1">
+    <tl c="RB" n="15520"/>
+    <dp pt="2511081442" pp="10" l="51" ppth="Frankfurt(Main)Süd|Hanau Hbf|..."/>
+  </s>
+</timetable>
+```
+
+Transformation:
+- `station_name=Frankfurt(Main)Hbf`
+- `service_id=607522038288083186-2511081442-1`
+- `train_number=15520`, `train_category=RB`
+- `event_type=dp`, `event_time=2025-11-08T14:42:00Z`, `platform=10`
+- `train_line_name=51`, `route_path='Frankfurt(Main)Süd|Hanau Hbf|...'`
+- `batch_id=<batch>`
+
+**Notes supplémentaires**
+- Le flux PLAN ne contient pas les heures modifiées (`ct`) ni les retards (`c`); ces champs proviennent des endpoints de changements (RCHG/FCHG).
+- Les doublons potentiels sur des combinaisons identiques (`station_name`, `service_id`, `event_type`, `event_time`, `platform`, `train_line_name`, `route_path`, `batch_id`) sont filtrés côté transformation par ensemble en mémoire pour éviter l’insertion multiple.
+### Pipeline RCHG (FR)
+
+**Introduction et contexte**
+- Objectif: transformer le flux XML RCHG (Recent CHanGes) en événements normalisés et dédupliqués dans `dwh.timetables_rchg_events`.
+- Source: XML brut du Timetables API (`/rchg`) stocké en `stg.timetables_rchg_raw` puis copié en `psa.timetables_rchg_raw`.
+- But: produire une ligne par message `<m>` au niveau `<s>` et par changement `<ar>/<dp>`, avec horodatages normalisés et garantie de déduplication.
+
+**Structure du pipeline**
+- Ingestion: sélection EVA (Brême) → appels `/rchg` → stockage XML en STG → copie PSA → purge STG.
+- Transformation: lecture XML PSA → extraction au niveau `<s>`, `<m>`, `<ar>`, `<dp>` → normalisation → insertion bulk avec `ON CONFLICT DO NOTHING` sur `event_hash`.
+
+**Signification des attributs (colonne → extraction → rôle)**
+- `event_id` → `<s id>` → identifiant local du nœud service.
+- `eva_number` → `<timetable eva>` → identifiant EVA de la gare.
+- `station_name` → `<timetable station>` → libellé de la gare.
+- `message_id` → `m@id` (NULL pour événements ar/dp sans message)
+- `event_type` → `m` (message), `dp` (départ), `ar` (arrivée)
+- `category` → `m@cat` (si disponible)
+- `change_type` → `m@t` (type de changement)
+- `priority` → `m@pr` (si disponible)
+- `valid_from` → `m@from` (ISO) pour messages au niveau `<s>`
+- `valid_to` → `m@to` (ISO)
+- `old_time` → `<dp/ar pt>` (ISO) pour changements horaires
+- `new_time` → `<dp/ar ct>` (ISO)
+- `delay_minutes` → `m@c` (entier) si présent
+- `platform` → `<dp/ar pp>`
+- `platform_change` → `<dp/ar cp>`
+- `route` → `<dp/ar ppth>`
+- `train_line_name` → `<dp/ar l>` (ex. RS1/51)
+- `timestamp_event` → priorité `ct` (si `<dp/ar>`), sinon `m@ts` (ISO), sinon NOW UTC
+- `batch_id` → identifiant de lot
+- `event_hash` → SHA1 des champs discriminants pour déduplication
+- `inserted_at` → DB DEFAULT
+
+**Logique métier appliquée**
+- Une ligne par message `<m>` au niveau `<s>`: remplit les métadonnées (`category`, `change_type`, `priority`, `valid_*`), sans `old/new_time`.
+- Une ligne par changement `<ar>/<dp>`: remplit les temps `pt/ct`, quai/changement, route, ligne, et copie la dernière info de message enfant si présente (`m` le plus récent sous le nœud) pour `message_id`, `category`, `change_type`, `delay_minutes`.
+- `timestamp_event`: `ct` prioritaire pour les événements d’arrivée/départ; fallback `m@ts` sinon NOW.
+- Déduplication: calcul `event_hash` sur un assemblage de champs clés; insertion avec `ON CONFLICT DO NOTHING`.
+
+**Exemple XML et transformation**
+
+```xml
+<timetable station="Bremen Hbf" eva="8000013">
+  <s id="1001">
+    <m id="M1" t="h" cat="info" pr="1" ts="2503110855" from="2503110800" to="2503111200" />
+    <dp pt="2503110920" ct="2503110925" pp="7" cp="7a" l="RS1" ppth="Bremen Hbf|Delmenhorst">
+      <m id="M2" t="f" c="5" ts="2503110918" />
+    </dp>
+  </s>
+</timetable>
+```
+
+Transformations:
+- Message ligne (`m` au niveau `<s>`):
+  - `event_type=m`, `message_id=M1`, `category=info`, `change_type=h`, `priority=1`, `valid_from=...0800Z`, `valid_to=...1200Z`, `timestamp_event=...0855Z`.
+- Changement départ (`dp`):
+  - `event_type=dp`, `old_time=...0920Z`, `new_time=...0925Z`, `platform=7`, `platform_change=7a`, `train_line_name=RS1`, `route='Bremen Hbf|Delmenhorst'`, `message_id=M2`, `change_type=f`, `delay_minutes=5`, `timestamp_event=...0925Z`.
+  - Déduplication assurée via `event_hash`.
+
+**Notes supplémentaires**
+- Résilience: un payload invalide n’arrête pas la transformation; il est ignoré.
+- Normalisation temps: `YYMMDDHHMM` converti en `YYYY-MM-DDTHH:MM:SSZ`.
+- Indexation: `uniq_dwh_timetables_rchg_event_hash`, indices sur `timestamp_event` et `eva_number` pour performance.

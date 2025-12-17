@@ -1,126 +1,29 @@
-import os
 import json
-import psycopg2
 import psycopg2.extras
 import xml.etree.ElementTree as ET
-
-
-def _conn_params():
-    return dict(
-        host=os.getenv("DATA_DB_HOST", "localhost"),
-        port=int(os.getenv("DATA_DB_PORT", "5432")),
-        dbname=os.getenv("DATA_DB_NAME", "train_dw"),
-        user=os.getenv("DATA_DB_USER", "dw"),
-        password=os.getenv("DATA_DB_PASSWORD", "dw"),
-    )
-
-
-def get_connection():
-    return psycopg2.connect(**_conn_params())
-
-
-def insert_json(table: str, payload, batch_id: str | None = None):
-    # payload kann List oder Dict sein
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            if isinstance(payload, list):
-                if batch_id is not None:
-                    values = [(json.dumps(item), batch_id) for item in payload]
-                    psycopg2.extras.execute_values(
-                        cur,
-                        f"INSERT INTO {table} (payload, batch_id) VALUES %s",
-                        values,
-                    )
-                else:
-                    values = [(json.dumps(item),) for item in payload]
-                    psycopg2.extras.execute_values(
-                        cur,
-                        f"INSERT INTO {table} (payload) VALUES %s",
-                        values,
-                    )
-            else:
-                if batch_id is not None:
-                    cur.execute(
-                        f"INSERT INTO {table} (payload, batch_id) VALUES (%s, %s)",
-                        (json.dumps(payload), batch_id),
-                    )
-                else:
-                    cur.execute(
-                        f"INSERT INTO {table} (payload) VALUES (%s)",
-                        (json.dumps(payload),),
-                    )
-
-
-def insert_text(table: str, texts: list[str] | str, batch_id: str | None = None):
-    """Insère du texte brut (par exemple XML) tel quel dans la colonne `payload`.
-
-    - Si `texts` est une liste de chaînes, effectue un insert en batch.
-    - Si `texts` est une seule chaîne, insère une seule ligne.
-    - Ne fait AUCUNE transformation (pas de JSON), conserve le contenu exactement.
-    """
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            if isinstance(texts, list):
-                if batch_id is not None:
-                    values = [(t, batch_id) for t in texts]
-                    psycopg2.extras.execute_values(
-                        cur,
-                        f"INSERT INTO {table} (payload, batch_id) VALUES %s",
-                        values,
-                    )
-                else:
-                    values = [(t,) for t in texts]
-                    psycopg2.extras.execute_values(
-                        cur,
-                        f"INSERT INTO {table} (payload) VALUES %s",
-                        values,
-                    )
-            else:
-                if batch_id is not None:
-                    cur.execute(
-                        f"INSERT INTO {table} (payload, batch_id) VALUES (%s, %s)",
-                        (texts, batch_id),
-                    )
-                else:
-                    cur.execute(
-                        f"INSERT INTO {table} (payload) VALUES (%s)",
-                        (texts,),
-                    )
-
-
-def log_api_call(source: str, endpoint: str, params: dict, status_code: int, response_time_ms: int, result_count: int, called_at):
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO metadata.api_call_log
-                (source, endpoint, params, status_code, response_time_ms, result_count, called_at)
-                VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s)
-                """,
-                (
-                    source,
-                    endpoint,
-                    json.dumps(params),
-                    status_code,
-                    response_time_ms,
-                    result_count,
-                    called_at,
-                ),
-            )
-
-
-# Entfernt: get_station_coords (nicht verwendet)
+import hashlib
+from .db_conn import get_connection
+from .db_insert import insert_json, insert_text
+from .db_logs import log_api_call, log_process_start, log_process_end, is_batch_processed
+from .db_batch import _get_latest_batch_id, get_latest_forecast_batch_id, get_latest_history_batch_id, get_last_archive_end_date
+from .db_stg_psa import (
+    copy_stations_stg_to_psa,
+    purge_stg_stations,
+    copy_weather_stg_to_psa,
+    purge_stg_weather,
+    copy_weather_archive_stg_to_psa,
+    purge_stg_weather_archive,
+    copy_timetables_plan_stg_to_psa,
+    purge_stg_timetables_plan,
+    copy_timetables_fchg_stg_to_psa,
+    purge_stg_timetables_fchg,
+    copy_timetables_rchg_stg_to_psa,
+    purge_stg_timetables_rchg,
+)
+from .weather_transform import insert_forecast_verticalized_to_dwh, insert_history_verticalized_to_dwh
 
 
 def get_bremen_station_coords(limit=None):
-    """
-    Gibt die Koordinaten (Breitengrad, Längengrad) von Stationen in Bremen zurück.
-    Kriterien:
-      - Latitude und Longitude nicht NULL
-      - eva_number nicht NULL
-      - Name beginnt mit 'Brem'
-      - ds100 beginnt mit 'HB' (ohne Anführungszeichen)
-    """
     query = """
         SELECT latitude, longitude
         FROM dwh.v_stations
@@ -130,10 +33,8 @@ def get_bremen_station_coords(limit=None):
           AND name LIKE 'Brem%'
           AND REPLACE(ds100, '"', '') LIKE 'HB%'
     """
-    
     if limit is not None:
         query += " LIMIT %s"
-
     with get_connection() as conn:
         with conn.cursor() as cur:
             if limit is not None:
@@ -142,367 +43,6 @@ def get_bremen_station_coords(limit=None):
                 cur.execute(query)
             rows = cur.fetchall()
             return [(float(lat), float(lon)) for lat, lon in rows]
-
-
-def copy_stations_stg_to_psa():
-    # Persistente Kopie der Stationen von STG nach PSA
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO psa.db_stations_raw (payload, batch_id, ingested_at)
-                SELECT s.payload, s.batch_id, s.ingested_at
-                FROM stg.db_stations_raw s
-                """
-            )
-
-
-def purge_stg_stations():
-    # Flüchtige Bereinigung der STG‑Daten nach erfolgreicher Kopie
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE stg.db_stations_raw")
-
-
-def copy_weather_stg_to_psa():
-    # Persistente Kopie der Wettervorhersagen von STG nach PSA
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO psa.weather_forecast_raw (payload, batch_id, ingested_at)
-                SELECT w.payload, w.batch_id, w.ingested_at
-                FROM stg.weather_forecast_raw w
-                """
-            )
-
-
-def purge_stg_weather():
-    # STG‑Bereinigung für Wettervorhersagen
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE stg.weather_forecast_raw")
-
-
-def copy_weather_archive_stg_to_psa():
-    # Persistente Kopie der Wetterarchive von STG nach PSA
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO psa.weather_history_raw (payload, batch_id, ingested_at)
-                SELECT a.payload, a.batch_id, a.ingested_at
-                FROM stg.weather_history_raw a
-                """
-            )
-
-
-def purge_stg_weather_archive():
-    # STG‑Bereinigung für Wetterarchive
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE stg.weather_history_raw")
-
-
-def copy_timetables_plan_stg_to_psa():
-    # Persistente Kopie der Timetables PLAN von STG nach PSA
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO psa.timetables_plan_raw (payload, batch_id, ingested_at)
-                SELECT s.payload, s.batch_id, s.ingested_at
-                FROM stg.timetables_plan_raw s
-                """
-            )
-
-
-def purge_stg_timetables_plan():
-    # STG‑Bereinigung für Timetables PLAN
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE stg.timetables_plan_raw")
-
-
-def copy_timetables_fchg_stg_to_psa():
-    # Persistente Kopie der Timetables FCHG von STG nach PSA
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO psa.timetables_fchg_raw (payload, batch_id, ingested_at)
-                SELECT s.payload, s.batch_id, s.ingested_at
-                FROM stg.timetables_fchg_raw s
-                """
-            )
-
-
-def purge_stg_timetables_fchg():
-    # STG‑Bereinigung für Timetables FCHG
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE stg.timetables_fchg_raw")
-
-
-def copy_timetables_rchg_stg_to_psa():
-    # Persistente Kopie der Timetables RCHG von STG nach PSA
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO psa.timetables_rchg_raw (payload, batch_id, ingested_at)
-                SELECT s.payload, s.batch_id, s.ingested_at
-                FROM stg.timetables_rchg_raw s
-                """
-            )
-
-
-def purge_stg_timetables_rchg():
-    # STG‑Bereinigung für Timetables RCHG
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE stg.timetables_rchg_raw")
-
-
-def _get_latest_batch_id(table: str) -> str | None:
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT batch_id FROM %s WHERE batch_id IS NOT NULL ORDER BY id DESC LIMIT 1" % table)
-            row = cur.fetchone()
-            return row[0] if row else None
-
-
-def get_latest_forecast_batch_id() -> str | None:
-    return _get_latest_batch_id("psa.weather_forecast_raw")
-
-
-def get_latest_history_batch_id() -> str | None:
-    return _get_latest_batch_id("psa.weather_history_raw")
-
-
-def get_last_archive_end_date() -> str | None:
-    """
-    Retourne le dernier end_date utilisé pour l'appel d'archive Open‑Meteo
-    basé sur le log des API (`metadata.api_call_log`).
-    On sélectionne la dernière entrée réussie (status 2xx) avec `endpoint='archive'`.
-    """
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT params->>'end_date' AS end_date
-                FROM metadata.api_call_log
-                WHERE source = 'open_meteo'
-                  AND endpoint = 'archive'
-                  AND status_code BETWEEN 200 AND 299
-                  AND params ? 'end_date'
-                ORDER BY called_at DESC
-                LIMIT 1
-                """
-            )
-            row = cur.fetchone()
-            return row[0] if row and row[0] else None
-
-
-# Entfernt: transform_*_batch_to_dwh (nur für Views, nicht verwendet)
-
-
-# Entfernt: _fetch_psa_payloads (nur für Python‑Validierungen verwendet)
-
-
-# Entfernt: validate_*_batch_python (nicht verwendet)
-
-
-# ===============================
-# Vertikalisierung und Einfügen ins DWH (physische Tabellen)
-# ===============================
-
-def _fetch_psa_entries(table: str, batch_id: str) -> list[tuple[int, dict]]:
-    """Gibt (psa_id, payload) für einen gegebenen PSA‑Batch zurück."""
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT id, payload FROM {table} WHERE batch_id = %s",
-                (batch_id,),
-            )
-            rows = cur.fetchall()
-            return [(int(r[0]), r[1]) for r in rows]
-
-
-def _load_stations_for_mapping() -> list[tuple[str, float, float]]:
-    """Charge uniquement les stations de Brême (station_id, latitude, longitude) pour le mapping.
-
-    Filtre aligné sur get_bremen_station_coords():
-      - latitude/longitude non null
-      - eva_number non null
-      - name LIKE 'Brem%'
-      - REPLACE(ds100, '"', '') LIKE 'HB%'
-    """
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT station_id, latitude, longitude
-                FROM dwh.v_stations
-                WHERE latitude IS NOT NULL
-                  AND longitude IS NOT NULL
-                  AND eva_number IS NOT NULL
-                  AND name LIKE 'Brem%'
-                  AND REPLACE(ds100, '"', '') LIKE 'HB%'
-                """
-            )
-            return [(str(sid), float(lat), float(lon)) for sid, lat, lon in cur.fetchall()]
-
-
-def _match_station_id(lat: float | None, lon: float | None, stations: list[tuple[str, float, float]]) -> str | None:
-    """
-    Gibt die nächstgelegene station_id zurück. Entspricht eine Station exakt (Toleranz ~1e‑4), wird sie gewählt.
-    Andernfalls wird die nächstgelegene nach euklidischer Distanz über (lat, lon) gewählt.
-    """
-    if lat is None or lon is None or not stations:
-        return None
-    tol = 1e-4
-    for sid, s_lat, s_lon in stations:
-        if abs(lat - s_lat) < tol and abs(lon - s_lon) < tol:
-            return sid
-    # ansonsten nächstgelegen
-    best_sid = None
-    best_d = None
-    for sid, s_lat, s_lon in stations:
-        d = (lat - s_lat) ** 2 + (lon - s_lon) ** 2
-        if best_d is None or d < best_d:
-            best_d = d
-            best_sid = sid
-    return best_sid
-
-
-def insert_forecast_verticalized_to_dwh(batch_id: str | None = None) -> int:
-    """
-    Vertikalisiert Forecast‑Payloads in stündliche Zeilen und fügt JSON ein
-    in dwh.weather_forecast_vertical_raw (payload JSONB, batch_id).
-    Gibt die Anzahl der eingefügten Zeilen zurück.
-    """
-    table = "psa.weather_forecast_raw"
-    if batch_id is None:
-        batch_id = _get_latest_batch_id(table)
-    if batch_id is None:
-        return 0
-
-    stations = _load_stations_for_mapping()
-    entries = _fetch_psa_entries(table, batch_id)
-
-    rows_to_insert = []
-    for psa_id, payload in entries:
-        try:
-            lat = float(payload.get("latitude")) if payload.get("latitude") is not None else None
-            lon = float(payload.get("longitude")) if payload.get("longitude") is not None else None
-            station_id = _match_station_id(lat, lon, stations)
-            # Vertikalisieren durch Iteration über Index der hourly‑Arrays
-            hourly = payload.get("hourly")
-            if not isinstance(hourly, dict):
-                continue
-            times = hourly.get("time", [])
-            n = len(times)
-            for i in range(n):
-                payload_row = {
-                    "psa_id": psa_id,
-                    "station_id": station_id,
-                    "batch_id": batch_id,
-                    "latitude": lat,
-                    "longitude": lon,
-                    "time": times[i],
-                }
-                for key, arr in hourly.items():
-                    if key == "time":
-                        continue
-                    if isinstance(arr, list) and i < len(arr):
-                        val = arr[i]
-                        if val is not None:
-                            payload_row[key] = val
-                rows_to_insert.append((json.dumps(payload_row), batch_id))
-        except Exception:
-            # Fehlgebildetes Payload: überspringen und fortfahren
-            continue
-
-    if not rows_to_insert:
-        return 0
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            psycopg2.extras.execute_values(
-                cur,
-                "INSERT INTO dwh.weather_forecast_vertical_raw (payload, batch_id) VALUES %s",
-                rows_to_insert,
-            )
-    return len(rows_to_insert)
-
-
-def insert_history_verticalized_to_dwh(batch_id: str | None = None) -> int:
-    """
-    Vertikalisiert History‑Payloads in stündliche Zeilen und fügt JSON ein
-    in dwh.weather_history_vertical_raw (payload JSONB, batch_id).
-    Gibt die Anzahl der eingefügten Zeilen zurück.
-    """
-    table = "psa.weather_history_raw"
-    if batch_id is None:
-        batch_id = _get_latest_batch_id(table)
-    if batch_id is None:
-        return 0
-
-    stations = _load_stations_for_mapping()
-    entries = _fetch_psa_entries(table, batch_id)
-
-    rows_to_insert = []
-    for psa_id, payload in entries:
-        try:
-            # History: Payload kann eine Liste von Objekten, ein einzelnes Objekt
-            # oder ein Dict mit Schlüssel 'results' (Liste von Objekten) sein
-            if isinstance(payload, list):
-                objs = payload
-            elif isinstance(payload, dict) and isinstance(payload.get("results"), list):
-                objs = payload.get("results")
-            else:
-                objs = [payload]
-            for obj in objs:
-                lat = float(obj.get("latitude")) if obj.get("latitude") is not None else None
-                lon = float(obj.get("longitude")) if obj.get("longitude") is not None else None
-                station_id = _match_station_id(lat, lon, stations)
-                hourly = obj.get("hourly")
-                if not isinstance(hourly, dict):
-                    continue
-                times = hourly.get("time", [])
-                n = len(times)
-                for i in range(n):
-                    payload_row = {
-                        "psa_id": psa_id,
-                        "station_id": station_id,
-                        "batch_id": batch_id,
-                        "latitude": lat,
-                        "longitude": lon,
-                        "time": times[i],
-                    }
-                    for key, arr in hourly.items():
-                        if key == "time":
-                            continue
-                        if isinstance(arr, list) and i < len(arr):
-                            val = arr[i]
-                            if val is not None:
-                                payload_row[key] = val
-                    rows_to_insert.append((json.dumps(payload_row), batch_id))
-        except Exception:
-            continue
-
-    if not rows_to_insert:
-        return 0
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            psycopg2.extras.execute_values(
-                cur,
-                "INSERT INTO dwh.weather_history_vertical_raw (payload, batch_id) VALUES %s",
-                rows_to_insert,
-            )
-    return len(rows_to_insert)
 
 
 def insert_timetables_fchg_events_to_dwh(batch_id: str | None = None) -> int:
@@ -525,6 +65,22 @@ def insert_timetables_fchg_events_to_dwh(batch_id: str | None = None) -> int:
             return f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:00Z"
         return None
 
+    def _tts_to_iso(s: str | None) -> str | None:
+        if not s:
+            return None
+        s = str(s)
+        try:
+            yy = int(s[0:2])
+            y = int("20" + s[0:2])
+            m = int(s[3:5])
+            d = int(s[6:8])
+            hh = int(s[9:11])
+            mm = int(s[12:14])
+            ss = int(s[15:17])
+            return f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}Z"
+        except Exception:
+            return None
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -542,54 +98,113 @@ def insert_timetables_fchg_events_to_dwh(batch_id: str | None = None) -> int:
         station_name = root.attrib.get("station")
         eva_number = root.attrib.get("eva")
         for s in root.findall("s"):
+            tl = s.find("tl")
+            train_type = tl.attrib.get("c") if tl is not None else None
+            ar_node = s.find("ar")
+            dp_node = s.find("dp")
+            ar_pt = _ts_to_iso(ar_node.attrib.get("pt")) if ar_node is not None else None
+            ar_ct = _ts_to_iso(ar_node.attrib.get("ct")) if ar_node is not None else None
+            dp_pt = _ts_to_iso(dp_node.attrib.get("pt")) if dp_node is not None else None
+            dp_ct = _ts_to_iso(dp_node.attrib.get("ct")) if dp_node is not None else None
+            ar_l = ar_node.attrib.get("l") if ar_node is not None else None
+            dp_l = dp_node.attrib.get("l") if dp_node is not None else None
+            train_name = ar_l or dp_l
+            ride_id = s.attrib.get("id")
+            line_num = None
+            try:
+                line_num = int(ar_l) if ar_l and str(ar_l).isdigit() else int(dp_l) if dp_l and str(dp_l).isdigit() else None
+            except Exception:
+                line_num = None
+            dest = None
+            if ar_node is not None:
+                ppth = ar_node.attrib.get("ppth") or ar_node.attrib.get("cpth")
+                if ppth:
+                    parts = str(ppth).split("|")
+                    dest = parts[-1] if parts else None
+            if dest is None and dp_node is not None:
+                ppth = dp_node.attrib.get("ppth") or dp_node.attrib.get("cpth")
+                if ppth:
+                    parts = str(ppth).split("|")
+                    dest = parts[-1] if parts else None
+            canceled = False
+            for node in [ar_node, dp_node]:
+                if node is None:
+                    continue
+                for m in node.findall("m"):
+                    mt = m.attrib.get("t")
+                    mc = m.attrib.get("c")
+                    if mt == "f" and mc is not None and str(mc).isdigit() and int(mc) > 0:
+                        canceled = True
+                        break
+
             for m in s.findall("m"):
                 msg_id = m.attrib.get("id")
                 t = m.attrib.get("t")
                 cat = m.attrib.get("cat")
                 pr = m.attrib.get("pr")
-                ts = _ts_to_iso(m.attrib.get("ts"))
-                vf = _ts_to_iso(m.attrib.get("from"))
-                vt = _ts_to_iso(m.attrib.get("to"))
+                ts = _ts_to_iso(m.attrib.get("ts")) or _tts_to_iso(m.attrib.get("ts-tts"))
+                c = m.attrib.get("c")
+                delay = int(c) if c is not None and str(c).isdigit() else None
                 row = (
                     eva_number,
                     station_name,
+                    train_name,
+                    dest,
+                    delay,
                     ts,
-                    msg_id,
+                    True if t == "f" and delay is not None and delay > 0 else canceled,
                     t,
                     cat,
                     int(pr) if pr is not None and str(pr).isdigit() else None,
-                    None,
-                    vf,
-                    vt,
-                    None,
+                    train_type,
+                    ride_id,
+                    line_num,
+                    ar_pt,
+                    ar_ct,
+                    dp_pt,
+                    dp_ct,
+                    msg_id,
                     batch_id,
                 )
                 to_insert.append(row)
+
             for parent_tag in ("ar", "dp"):
-                for node in s.findall(parent_tag):
-                    ct = _ts_to_iso(node.attrib.get("ct"))
-                    cp = node.attrib.get("cp")
-                    for m in node.findall("m"):
-                        msg_id = m.attrib.get("id")
-                        t = m.attrib.get("t")
-                        c = m.attrib.get("c")
-                        ts = _ts_to_iso(m.attrib.get("ts"))
-                        ev_time = ct or ts
-                        row = (
-                            eva_number,
-                            station_name,
-                            ev_time,
-                            msg_id,
-                            t,
-                            None,
-                            None,
-                            int(c) if c is not None and str(c).isdigit() else None,
-                            None,
-                            None,
-                            cp,
-                            batch_id,
-                        )
-                        to_insert.append(row)
+                node = s.find(parent_tag)
+                if node is None:
+                    continue
+                msgs = node.findall("m")
+                last_m = msgs[-1] if msgs else None
+                msg_id = last_m.attrib.get("id") if last_m is not None else None
+                t = last_m.attrib.get("t") if last_m is not None else None
+                cat = None
+                pr = last_m.attrib.get("pr") if last_m is not None else None
+                ts = None
+                if last_m is not None:
+                    ts = _ts_to_iso(last_m.attrib.get("ts")) or _tts_to_iso(last_m.attrib.get("ts-tts"))
+                c = last_m.attrib.get("c") if last_m is not None else None
+                delay = int(c) if c is not None and str(c).isdigit() else None
+                row = (
+                    eva_number,
+                    station_name,
+                    train_name,
+                    dest,
+                    delay,
+                    ts,
+                    canceled,
+                    t,
+                    cat,
+                    int(pr) if pr is not None and str(pr).isdigit() else None,
+                    train_type,
+                    ride_id,
+                    line_num,
+                    ar_pt,
+                    ar_ct,
+                    dp_pt,
+                    dp_ct,
+                    msg_id,
+                    batch_id,
+                )
+                to_insert.append(row)
 
     if not to_insert:
         return 0
@@ -600,7 +215,7 @@ def insert_timetables_fchg_events_to_dwh(batch_id: str | None = None) -> int:
                 cur,
                 """
                 INSERT INTO dwh.timetables_fchg_events
-                (eva_number, station_name, event_time, message_id, type, category, priority, delay_minutes, valid_from, valid_to, platform_change, batch_id)
+                (eva_number, station_name, train_name, final_destination_station, delay_in_min, event_time, is_canceled, type, category, priority, train_type, train_line_ride_id, train_line_station_num, arrival_planned_time, arrival_change_time, departure_planned_time, departure_change_time, message_id, batch_id)
                 VALUES %s
                 """,
                 to_insert,
@@ -608,56 +223,7 @@ def insert_timetables_fchg_events_to_dwh(batch_id: str | None = None) -> int:
     return len(to_insert)
 
 
-def log_process_start(process_name: str, batch_id: str | None = None):
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO metadata.process_log (process_name, status, message, batch_id)
-                VALUES (%s, %s, %s, %s)
-                RETURNING id
-                """,
-                (process_name, "running", "start", batch_id),
-            )
-            row = cur.fetchone()
-            return int(row[0]) if row else None
 
-
-def log_process_end(process_id: int, status: str, message: str | None = None):
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE metadata.process_log
-                SET status = %s, finished_at = NOW(), message = %s
-                WHERE id = %s
-                """,
-                (status, message, int(process_id)),
-            )
-
-
-def is_batch_processed(process_name: str, batch_id: str) -> bool:
-    """
-    Vérifie si un batch a déjà été traité avec succès pour un process donné.
-    Retourne True si une entrée avec status='success' existe dans metadata.process_log.
-    """
-    if batch_id is None:
-        return False
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT 1
-                FROM metadata.process_log
-                WHERE process_name = %s
-                  AND batch_id = %s
-                  AND status = 'success'
-                ORDER BY finished_at DESC NULLS LAST
-                LIMIT 1
-                """,
-                (process_name, batch_id),
-            )
-            return cur.fetchone() is not None
 
 
 def insert_timetables_plan_events_to_dwh(batch_id: str | None = None) -> int:
@@ -697,7 +263,7 @@ def insert_timetables_plan_events_to_dwh(batch_id: str | None = None) -> int:
             continue
         station_name = root.attrib.get("station")
         for s in root.findall("s"):
-            service_id = s.attrib.get("id")
+            train_line_ride_id = s.attrib.get("id")
             tl = s.find("tl")
             train_number = tl.attrib.get("n") if tl is not None else None
             train_category = tl.attrib.get("c") if tl is not None else None
@@ -712,7 +278,7 @@ def insert_timetables_plan_events_to_dwh(batch_id: str | None = None) -> int:
                     route_path = node.attrib.get("ppth")
                     key = (
                         station_name,
-                        service_id,
+                        train_line_ride_id,
                         train_number,
                         train_category,
                         train_type,
@@ -734,15 +300,15 @@ def insert_timetables_plan_events_to_dwh(batch_id: str | None = None) -> int:
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """
-                    INSERT INTO dwh.timetables_plan_events
-                    (station_name, service_id, train_number, train_category, train_type, train_direction, event_type, event_time, platform, train_line_name, route_path, batch_id)
-                    VALUES %s
-                    """,
-                    to_insert,
-                )
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO dwh.timetables_plan_events
+                (station_name, train_line_ride_id, train_number, train_category, train_type, train_direction, event_type, event_time, platform, train_line_name, route_path, batch_id)
+                VALUES %s
+                """,
+                to_insert,
+            )
     return len(to_insert)
 
 
@@ -809,24 +375,24 @@ def insert_timetables_rchg_events_to_dwh(batch_id: str | None = None) -> int:
                 route = None
                 ts_event = ts or _now_iso()
                 parts = [
-                    event_id or "",
-                    eva_number or "",
-                    station_name or "",
-                    msg_id or "",
-                    "m",
-                    cat or "",
-                    t or "",
-                    str(pr) if pr is not None else "",
-                    vf or "",
-                    vt or "",
-                    old_time or "",
-                    new_time or "",
-                    str(c) if c is not None else "",
-                    platform or "",
-                    platform_change or "",
-                    route or "",
-                    ts_event or "",
-                ]
+                        event_id or "",
+                        eva_number or "",
+                        station_name or "",
+                        msg_id or "",
+                        "m",
+                        cat or "",
+                        t or "",
+                        str(pr) if pr is not None else "",
+                        vf or "",
+                        vt or "",
+                        old_time or "",
+                        new_time or "",
+                        str(c) if c is not None else "",
+                        platform or "",
+                        platform_change or "",
+                        route or "",
+                        ts_event or "",
+                    ]
                 h = hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
                 if h in seen:
                     continue
