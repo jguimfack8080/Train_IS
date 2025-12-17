@@ -40,6 +40,43 @@
 - Keine Code-Duplizierung: Utility-Funktionen für Inserts/Logs.
 - Saubere Trennung: STG (roh) → PSA (roh, persistent) → DWH (bereinigt).
 - Reproduzierbarkeit: METADATA protokolliert jede Phase und jeden API-Call.
+- Konsistente Zeitstempel: Gesamtes System (DB, Airflow, Container) läuft auf `Europe/Berlin` zur Vermeidung von UTC-Offset-Verwirrung bei lokalen Analysen.
+
+## Troubleshooting: Zeitzonen-Problem (Gelöst)
+**Symptom:**
+In den Datenbanktabellen (z.B. `metadata.process_log`, `stg.*`) erschienen Zeitstempel (`ingested_at`, `started_at`) mit einem Versatz von -1 Stunde im Vergleich zur lokalen Zeit (Deutschland/Winterzeit).
+
+**Ursache:**
+- Die Spalten nutzen `DEFAULT NOW()`.
+- Der PostgreSQL-Container lief standardmäßig in `UTC` (Coordinated Universal Time).
+- `NOW()` lieferte daher die UTC-Zeit (z.B. 13:00 statt 14:00).
+- Airflow und das Host-System liefen bereits auf `Europe/Berlin`.
+
+**Lösung (Umgesetzt am 2025-12-17):**
+1.  **Infrastructure-Level:** Environment-Variable `TZ: Europe/Berlin` zum `postgres`-Service in `docker-compose.yml` hinzugefügt.
+2.  **Hotfix:** Laufenden Container via `ALTER ROLE/DATABASE ... SET timezone ...` auf Berlin umgestellt, ohne Neustart.
+3.  **Daten-Integrität:** Historische Daten waren korrekt (absolute Zeitpunkte), wurden nur "falsch" (in UTC) angezeigt. Nach der Umstellung werden auch alte Einträge korrekt in lokaler Zeit dargestellt.
+
+**Ausgeführte Hotfix-Befehle:**
+```bash
+# 1. Status prüfen (vorher)
+docker exec train_postgres psql -U postgres -c "SHOW timezone;"
+docker exec train_postgres psql -U postgres -c "SELECT NOW();"
+
+# 2. Konfiguration anpassen (Hotfix für laufenden Container)
+docker exec train_postgres psql -U postgres -c "ALTER ROLE postgres SET timezone TO 'Europe/Berlin';"
+docker exec train_postgres psql -U postgres -c "ALTER ROLE airflow SET timezone TO 'Europe/Berlin';"
+docker exec train_postgres psql -U postgres -c "ALTER ROLE dw SET timezone TO 'Europe/Berlin';"
+docker exec train_postgres psql -U postgres -c "ALTER DATABASE airflow SET timezone TO 'Europe/Berlin';"
+docker exec train_postgres psql -U postgres -c "ALTER DATABASE train_dw SET timezone TO 'Europe/Berlin';"
+
+# 3. Verifikation
+docker exec train_postgres psql -U postgres -d train_dw -c "SHOW timezone;"
+docker exec train_postgres psql -U postgres -d train_dw -c "SELECT NOW();"
+
+# 4. Daten prüfen (Vergleich UTC vs Berlin)
+docker exec train_postgres psql -U postgres -d train_dw -c "SELECT id, ingested_at, ingested_at AT TIME ZONE 'UTC' as as_utc, ingested_at AT TIME ZONE 'Europe/Berlin' as as_berlin FROM stg.db_stations_raw ORDER BY id DESC LIMIT 5;"
+```
 
 ## Verifikation (CLI)
 - Zeilen zählen (Stationsrohdaten):
