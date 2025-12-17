@@ -19,9 +19,9 @@
  - Timetables (XML, `payload TEXT`): `stg.timetables_plan_raw`, `stg.timetables_fchg_raw`, `stg.timetables_rchg_raw`
 - `psa.*` – persistente Kopien der Rohdaten.
 - `dwh.stations` – bereinigte Stationsdaten mit Koordinaten.
-- `dwh.weather_hourly` – aufbereitete Wetterzeitreihen.
+- `dwh.v_weather_forecast_hourly`, `dwh.v_weather_history_hourly` – aufbereitete Wetterzeitreihen (Views lesen aus `psa.weather_forecast_vertical_raw` und `psa.weather_history_vertical_raw`).
 - `dwh.timetables_fchg_events` – transformierte Ereignisse aus FCHG (EVA‑basiert; eine Zeile je Ereignis mit `eva_number`, `station_name`, `event_time`, `type`, `category`, `priority`, `delay_minutes`, `valid_from`, `valid_to`, `platform_change`, `batch_id`).
-- `dwh.timetables_plan_events` – transformierte PLAN‑Ereignisse (eine Zeile je Abfahrt/Ankunft; Felder: `station_name`, `service_id`, `train_number`, `train_category`, `train_type`, `train_direction`, `event_type`, `event_time`, `platform`, `train_line_name`, `route_path`, `batch_id`).
+- `dwh.timetables_plan_events` – transformierte PLAN‑Ereignisse (eine Zeile je Abfahrt/Ankunft; Felder: `station_name`, `train_line_ride_id`, `train_number`, `train_category`, `train_type`, `train_direction`, `event_type`, `event_time`, `platform`, `train_line_name`, `route_path`, `batch_id`).
  - `dwh.timetables_rchg_events` – transformierte RCHG‑Ereignisse (Recent Changes; eine Zeile je Nachricht oder Knotenereignis `m/ar/dp`; Felder: `event_id`, `eva_number`, `station_name`, `message_id`, `event_type`, `category`, `change_type`, `priority`, `valid_from`, `valid_to`, `old_time`, `new_time`, `delay_minutes`, `platform`, `platform_change`, `route`, `train_line_name`, `timestamp_event`, `batch_id`, `event_hash`).
 
 ## Änderungen und Updates

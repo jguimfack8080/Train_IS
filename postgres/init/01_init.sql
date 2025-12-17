@@ -179,14 +179,14 @@ CREATE TABLE IF NOT EXISTS stg.weather_history_vertical_raw (
   ingested_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS dwh.weather_forecast_vertical_raw (
+CREATE TABLE IF NOT EXISTS psa.weather_forecast_vertical_raw (
   id BIGSERIAL PRIMARY KEY,
   payload JSONB NOT NULL,
   batch_id TEXT,
   inserted_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS dwh.weather_history_vertical_raw (
+CREATE TABLE IF NOT EXISTS psa.weather_history_vertical_raw (
   id BIGSERIAL PRIMARY KEY,
   payload JSONB NOT NULL,
   batch_id TEXT,
@@ -350,7 +350,7 @@ SELECT DISTINCT ON (s.station_id, r.payload->>'time')
   (r.payload->>'wind_speed_10m')::double precision AS wind_speed_10m,
   (r.payload->>'evapotranspiration')::double precision AS evapotranspiration,
   (r.payload->>'vapour_pressure_deficit')::double precision AS vapour_pressure_deficit
-FROM dwh.weather_forecast_vertical_raw r
+FROM psa.weather_forecast_vertical_raw r
 LEFT JOIN dwh.v_stations s ON s.station_id = r.payload->>'station_id'
 WHERE (r.payload->>'time') IS NOT NULL
   AND (r.payload->>'station_id') IS NOT NULL
@@ -385,7 +385,7 @@ SELECT DISTINCT ON (s.station_id, r.payload->>'time')
   (r.payload->>'cloud_cover_high')::double precision AS cloud_cover_high,
   (r.payload->>'visibility')::double precision AS visibility,
   (r.payload->>'wind_speed_10m')::double precision AS wind_speed_10m
-FROM dwh.weather_history_vertical_raw r
+FROM psa.weather_history_vertical_raw r
 LEFT JOIN dwh.v_stations s ON s.station_id = r.payload->>'station_id'
 WHERE (r.payload->>'time') IS NOT NULL
   AND (r.payload->>'station_id') IS NOT NULL
@@ -393,16 +393,16 @@ ORDER BY s.station_id, r.payload->>'time', r.batch_id DESC;
 
 -- Empfohlene Indizes zur Performanceoptimierung
 CREATE INDEX IF NOT EXISTS idx_forecast_station 
-  ON dwh.weather_forecast_vertical_raw ((payload->>'station_id'));
+  ON psa.weather_forecast_vertical_raw ((payload->>'station_id'));
 
 CREATE INDEX IF NOT EXISTS idx_forecast_time 
-  ON dwh.weather_forecast_vertical_raw ((payload->>'time'));
+  ON psa.weather_forecast_vertical_raw ((payload->>'time'));
 
 CREATE INDEX IF NOT EXISTS idx_history_station 
-  ON dwh.weather_history_vertical_raw ((payload->>'station_id'));
+  ON psa.weather_history_vertical_raw ((payload->>'station_id'));
 
 CREATE INDEX IF NOT EXISTS idx_history_time 
-  ON dwh.weather_history_vertical_raw ((payload->>'time'));
+  ON psa.weather_history_vertical_raw ((payload->>'time'));
 
 -- ===============================
 -- DWH‑View Stationen
@@ -426,8 +426,8 @@ CREATE INDEX IF NOT EXISTS idx_stg_timetables_rchg_raw_batch_id ON stg.timetable
 CREATE INDEX IF NOT EXISTS idx_psa_timetables_rchg_raw_batch_id ON psa.timetables_rchg_raw(batch_id);
 CREATE INDEX IF NOT EXISTS idx_stg_weather_forecast_vertical_raw_batch_id ON stg.weather_forecast_vertical_raw(batch_id);
 CREATE INDEX IF NOT EXISTS idx_stg_weather_history_vertical_raw_batch_id ON stg.weather_history_vertical_raw(batch_id);
-CREATE INDEX IF NOT EXISTS idx_dwh_weather_forecast_vertical_raw_batch_id ON dwh.weather_forecast_vertical_raw(batch_id);
-CREATE INDEX IF NOT EXISTS idx_dwh_weather_history_vertical_raw_batch_id ON dwh.weather_history_vertical_raw(batch_id);
+CREATE INDEX IF NOT EXISTS idx_psa_weather_forecast_vertical_raw_batch_id ON psa.weather_forecast_vertical_raw(batch_id);
+CREATE INDEX IF NOT EXISTS idx_psa_weather_history_vertical_raw_batch_id ON psa.weather_history_vertical_raw(batch_id);
 CREATE INDEX IF NOT EXISTS idx_dwh_timetables_fchg_events_eva_number ON dwh.timetables_fchg_events(eva_number);
 CREATE INDEX IF NOT EXISTS idx_dwh_timetables_fchg_events_time ON dwh.timetables_fchg_events(event_time);
 CREATE INDEX IF NOT EXISTS idx_dwh_timetables_fchg_events_category ON dwh.timetables_fchg_events(category);
