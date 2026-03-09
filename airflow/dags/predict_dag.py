@@ -12,16 +12,16 @@ default_args = {
 }
 
 with DAG(
-    'predict_delay_lstm',
+    'predict_future_delays',
     default_args=default_args,
-    description='Run LSTM prediction every 15 minutes',
-    schedule_interval='*/15 * * * *',
+    description='Run LSTM prediction for future trains every 10 minutes',
+    schedule_interval='*/10 * * * *',
     start_date=datetime(2024, 1, 1),
     catchup=False,
-    tags=['ml', 'prediction', 'lstm'],
+    tags=['ml', 'prediction', 'lstm', 'future'],
 ) as dag:
 
     predict_task = BashOperator(
-        task_id='run_prediction',
-        bash_command='docker exec ml_engine python predict.py'
+        task_id='run_future_prediction',
+        bash_command='docker exec ml_engine python /app/predict_future.py'
     )

@@ -48,7 +48,7 @@ def _collect_payloads(evas: List[str], fetch_fn, endpoint: str, batch_id: str) -
     return payloads, success
 
 
-def ingest_plan(logical_date: datetime) -> Dict[str, int]:
+def ingest_plan(logical_date: datetime, batch_id: str | None = None) -> Dict[str, int]:
     """Ingestion pour l’endpoint PLAN (XML par date/heure).
 
     - Filtre les gares via util stations
@@ -60,7 +60,8 @@ def ingest_plan(logical_date: datetime) -> Dict[str, int]:
     yymmdd = fmt_yymmdd(berlin_dt)
     hh = fmt_hh(berlin_dt)
 
-    batch_id = _batch_id("PLAN", datetime.utcnow())
+    if batch_id is None:
+        batch_id = _batch_id("PLAN", datetime.utcnow())
     process_id = db_utils.log_process_start(process_name="db_timetables_plan_import", batch_id=batch_id)
     try:
         evas = get_eva_numbers()

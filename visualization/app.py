@@ -2,305 +2,550 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import os
+import math
 
-# Page Config
+# Timezone Configuration
+BERLIN_TZ = ZoneInfo("Europe/Berlin")
+
+# Page config
 st.set_page_config(
-    page_title="Train Delay Prediction - Dashboard",
+    page_title="Train_IS - Verspätungsprognose-Dashboard",
     page_icon="🚄",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for Modern Look
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
-    html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif;
-    }
-
-    /* Global Cards */
-    .kpi-card {
-        background: white;
-        border-radius: 12px;
-        padding: 20px 24px;
-        margin: 10px 0;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-        border: 1px solid #e5e7eb;
-        transition: all 0.3s ease;
-        position: relative;
-        overflow: hidden;
-    }
-    
-    .kpi-card:hover {
-        transform: translateY(-4px);
-        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-    }
-    
-    .kpi-title {
-        font-size: 0.85rem;
-        color: #6B7280;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        font-weight: 600;
-        margin-bottom: 8px;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-    
-    .kpi-value {
-        font-size: 2rem;
-        font-weight: 700;
-        color: #111827;
-        line-height: 1.2;
-    }
-    
-    .kpi-icon {
-        font-size: 1.2rem;
-        padding: 6px;
-        border-radius: 8px;
-        background: rgba(0,0,0,0.05);
-    }
-
-    /* Risk Specifics - Elegant Accents */
-    .card-critical {
-        border-left: 5px solid #EF4444;
-        background: linear-gradient(to right, #FEF2F2, #FFFFFF);
-    }
-    .card-critical .kpi-value { color: #B91C1C; }
-    .card-critical .kpi-icon { color: #EF4444; background: #FEE2E2; }
-
-    .card-possible {
-        border-left: 5px solid #F59E0B;
-        background: linear-gradient(to right, #FFFBEB, #FFFFFF);
-    }
-    .card-possible .kpi-value { color: #B45309; }
-    .card-possible .kpi-icon { color: #F59E0B; background: #FEF3C7; }
-
-    .card-ok {
-        border-left: 5px solid #10B981;
-        background: linear-gradient(to right, #ECFDF5, #FFFFFF);
-    }
-    .card-ok .kpi-value { color: #047857; }
-    .card-ok .kpi-icon { color: #10B981; background: #D1FAE5; }
-    
-    .card-neutral {
-        border-left: 5px solid #6B7280;
-        background: white;
-    }
-</style>
-""", unsafe_allow_html=True)
+# Initialize Session State
+if 'active_filter' not in st.session_state:
+    st.session_state.active_filter = 'all'  # Options: 'all', 'canceled', 'high_risk', 'delayed'
+if 'page_number' not in st.session_state:
+    st.session_state.page_number = 1
+if 'rows_per_page' not in st.session_state:
+    st.session_state.rows_per_page = 20
 
 # Database Connection
 @st.cache_resource
-def get_engine():
-    db_user = os.getenv("DATA_DB_USER", "dw")
-    db_password = os.getenv("DATA_DB_PASSWORD", "dw")
-    db_host = os.getenv("DATA_DB_HOST", "postgres")
-    db_port = os.getenv("DATA_DB_PORT", "5432")
-    db_name = os.getenv("DATA_DB_NAME", "train_dw")
+def get_db_engine():
+    # Let's stick to standard env vars from docker-compose
+    user = os.getenv("DATA_DB_USER", "dw")
+    password = os.getenv("DATA_DB_PASSWORD", "dw")
+    host = os.getenv("DATA_DB_HOST", "postgres")
+    port = os.getenv("DATA_DB_PORT", "5432")
+    dbname = os.getenv("DATA_DB_NAME", "train_dw")
     
-    connection_str = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-    return create_engine(connection_str)
+    return create_engine(f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{dbname}")
 
-@st.cache_data(ttl=600)
-def load_data():
-    engine = get_engine()
-    # Limit to last 1000 records for performance in MVP
-    query = """
-    SELECT * 
-    FROM dwh.v_training_dataset 
-    ORDER BY scheduled_time DESC 
-    LIMIT 2000;
-    """
-    try:
-        df = pd.read_sql(query, engine)
-        return df
-    except Exception as e:
-        st.error(f"Erreur de connexion à la base de données: {e}")
-        return pd.DataFrame()
-
-# Main App
-def main():
-    st.title("🚄 Bremen Train Delay Intelligence")
-    st.markdown("### Analyse et Monitoring des Retards (Dataset ML)")
-
-    # Sidebar
-    st.sidebar.header("Filtres")
+@st.cache_data(ttl=60, show_spinner=False)
+def load_data(historical=False):
+    engine = get_db_engine()
     
-    # Load Data
-    with st.spinner('Chargement des données...'):
-        df = load_data()
+    if historical:
+        # Load all data with pagination if needed (here limit 50000 for performance)
+        time_filter = ""
+        limit = "LIMIT 50000"
+    else:
+        # Load NOW - 1h to NOW + 24h (Optimized window)
+        time_filter = "WHERE p.scheduled_time >= NOW() - INTERVAL '1 HOUR' AND p.scheduled_time <= NOW() + INTERVAL '24 HOURS'"
+        limit = ""
 
-    if df.empty:
-        st.warning("Aucune donnée disponible ou erreur de connexion.")
-        return
-
-    # Sidebar Filters
-    stations = ["Toutes"] + list(df['station_name'].dropna().unique())
-    selected_station = st.sidebar.selectbox("Gare", stations)
-    
-    train_types = ["Tous"] + list(df['train_type'].dropna().unique())
-    selected_type = st.sidebar.selectbox("Type de Train", train_types)
-
-    # Filtering Logic
-    filtered_df = df.copy()
-    if selected_station != "Toutes":
-        filtered_df = filtered_df[filtered_df['station_name'] == selected_station]
-    if selected_type != "Tous":
-        filtered_df = filtered_df[filtered_df['train_type'] == selected_type]
-
-    # KPIs
-    st.markdown("### 📊 Performance Historique (24h)")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    avg_delay = filtered_df['current_delay'].mean()
-    max_delay = filtered_df['current_delay'].max()
-    cancel_rate = filtered_df['is_canceled'].mean() * 100
-    weather_impact = filtered_df[filtered_df['precipitation'] > 0]['current_delay'].mean()
-
-    # Helper for KPI Card
-    def kpi_card(title, value, icon, col, status="neutral"):
-        card_class = "kpi-card"
-        if status == "critical": card_class += " card-critical"
-        elif status == "warning": card_class += " card-possible"
-        elif status == "good": card_class += " card-ok"
-        
-        col.markdown(f"""
-        <div class="{card_class}">
-            <div class="kpi-title">{icon} {title}</div>
-            <div class="kpi-value">{value}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    kpi_card("Retard Moyen", f"{avg_delay:.2f} min", "⏱️", col1, "warning" if avg_delay > 5 else "neutral")
-    kpi_card("Retard Max", f"{max_delay:.0f} min", "🛑", col2, "critical" if max_delay > 20 else "neutral")
-    kpi_card("Annulations", f"{cancel_rate:.1f}%", "🚫", col3, "critical" if cancel_rate > 5 else "neutral")
-    kpi_card("Impact Pluie", f"{weather_impact:.2f} min", "🌧️", col4)
-
-    # PREDICTIONS SECTION
-    st.markdown("---")
-    st.header("🔮 Prédictions de Retard (LSTM)")
-    
-    # Load Predictions
-    @st.cache_data(ttl=60)
-    def load_predictions():
-        engine = get_engine()
-        query = """
-        WITH latest_status AS (
-            SELECT DISTINCT ON (train_line_ride_id, eva_number)
-                train_line_ride_id,
-                eva_number,
-                train_type,
-                train_name,
-                is_canceled,
-                station_name
-            FROM dwh.timetables_fchg_events
-            ORDER BY train_line_ride_id, eva_number, id DESC
-        )
+    query = f"""
+    WITH predictions_data AS (
         SELECT 
             p.train_line_ride_id,
-            p.eva_number,
-            COALESCE(s.name, ls.station_name, p.station_name, 'Inconnu') as station_name,
-            ls.train_name,
-            ls.train_type,
-            ls.is_canceled,
+            p.station_name,
             p.scheduled_time,
             p.predicted_delay_min,
             p.prediction_proba_class,
+            p.confidence_score,
             p.predicted_at
         FROM dwh.predictions p
-        LEFT JOIN dwh.v_stations s ON p.eva_number = s.eva_number
-        LEFT JOIN latest_status ls ON p.train_line_ride_id = ls.train_line_ride_id AND p.eva_number = ls.eva_number
-        WHERE (p.scheduled_time + (COALESCE(p.predicted_delay_min, 0) * INTERVAL '1 minute')) > NOW()
-        ORDER BY p.scheduled_time ASC 
-        LIMIT 100
+        {time_filter}
+        ORDER BY p.scheduled_time ASC
+        {limit}
+    ),
+    train_info AS (
+        SELECT DISTINCT ON (train_line_ride_id)
+            train_line_ride_id,
+            train_number,
+            train_line_name as train_line,
+            train_type,
+            train_direction,
+            route_path,
+            -- Pre-calculate parsed direction from route_path (last element)
+            split_part(route_path, '|', array_length(string_to_array(route_path, '|'), 1)) as parsed_direction
+        FROM dwh.timetables_plan_events
+    ),
+    train_status AS (
+        SELECT DISTINCT ON (train_line_ride_id)
+            train_line_ride_id,
+            is_canceled,
+            train_name,
+            delay_in_min
+        FROM dwh.timetables_fchg_events
+        ORDER BY train_line_ride_id, event_time DESC
+    )
+    SELECT 
+        pd.*,
+        COALESCE(ts.train_name, ti.train_number, split_part(pd.train_line_ride_id, '-', 2)) as train_number,
+        ti.train_line,
+        ti.train_type,
+        -- Use the last station in route_path as true direction/destination if available
+        -- Filter out numeric/short garbage (e.g. "5", "7", "8Süd") by checking if it starts with a digit
+        COALESCE(
+            CASE WHEN ti.parsed_direction !~ '^[0-9]' THEN ti.parsed_direction END,
+            CASE WHEN ti.train_direction !~ '^[0-9]' THEN ti.train_direction END,
+            'Unbekanntes Ziel'
+        ) as train_direction,
+        ti.route_path,
+        COALESCE(ts.is_canceled, FALSE) as is_canceled,
+        ts.delay_in_min as current_delay
+    FROM predictions_data pd
+    LEFT JOIN train_info ti ON pd.train_line_ride_id = ti.train_line_ride_id
+    LEFT JOIN train_status ts ON pd.train_line_ride_id = ts.train_line_ride_id
+    """
+    
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(text(query), conn)
+        
+        # Convert timestamps to Berlin Timezone
+        if not df.empty:
+            for col in ['scheduled_time', 'predicted_at']:
+                if col in df.columns:
+                    # Ensure datetime is timezone-aware (assume UTC if naive)
+                    if df[col].dt.tz is None:
+                         df[col] = df[col].dt.tz_localize(timezone.utc)
+                    
+                    # Convert to Berlin Time
+                    df[col] = df[col].dt.tz_convert(BERLIN_TZ)
+        
+        return df
+    except Exception as e:
+        st.error(f"Fehler beim Laden der Daten: {e}")
+        return pd.DataFrame()
+
+# Timeline Generation Function (HTML)
+def render_timeline(route_path):
+    if not route_path or pd.isna(route_path):
+        return '<div style="color: #666; font-style: italic; padding: 10px;">Unbekannte Strecke</div>'
+    
+    # Parsing: Split by |, trim spaces
+    stops = [s.strip() for s in str(route_path).split('|') if s.strip()]
+    
+    if not stops:
+        return '<div style="color: #666; font-style: italic; padding: 10px;">Unbekannte Strecke</div>'
+
+    # Using horizontal scroll for "All visible" requirement
+    container_style = "display: flex; align-items: flex-start; overflow-x: auto; padding: 15px 5px; scrollbar-width: thin; width: 100%;"
+    
+    html_parts = []
+    html_parts.append(f'<div style="{container_style}">')
+    
+    for i, stop in enumerate(stops):
+        is_first = (i == 0)
+        is_last = (i == len(stops) - 1)
+        
+        # Connector Line (draw before the node, unless it's the first node)
+        if i > 0:
+            html_parts.append('<div style="min-width: 40px; height: 2px; background-color: #ccc; margin-top: 7px; flex-shrink: 0;"></div>')
+            
+        # Node Style
+        if is_first:
+            # Start: Distinct marker (Green filled circle) + Bold Text
+            marker_style = "width: 16px; height: 16px; background-color: #2e7d32; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 2px #2e7d32;"
+            text_style = "font-weight: bold; color: #2e7d32; font-size: 0.9em;"
+        elif is_last:
+            # End: Distinct marker (Red filled circle) + Bold Text
+            marker_style = "width: 16px; height: 16px; background-color: #d32f2f; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 2px #d32f2f;"
+            text_style = "font-weight: bold; color: #d32f2f; font-size: 0.9em;"
+        else:
+            # Intermediate: Smaller dot + Normal Text
+            marker_style = "width: 10px; height: 10px; background-color: #666; border-radius: 50%; margin-top: 3px;"
+            text_style = "font-weight: normal; color: #444; font-size: 0.8em;"
+            
+        # Node Container
+        # min-width ensures text doesn't squash too much, but scroll handles the rest
+        node_html = f"""
+        <div style="display: flex; flex-direction: column; align-items: center; min-width: 100px; flex-shrink: 0; position: relative;">
+            <div style="{marker_style} margin-bottom: 8px;"></div>
+            <div style="{text_style} text-align: center; white-space: normal; line-height: 1.2; word-wrap: break-word; max-width: 120px;" title="{stop}">
+                {stop}
+            </div>
+        </div>
         """
-        try:
-            return pd.read_sql(query, engine)
-        except Exception as e:
-            st.error(f"Erreur SQL Predictions: {e}")
-            print(f"Erreur SQL Predictions: {e}")
-            return pd.DataFrame()
-
-    pred_df = load_predictions()
-    
-    if not pred_df.empty:
-        # Filter predictions if station selected
-        if selected_station != "Toutes":
-            # Note: Station name might be missing in predictions table if not joined, 
-            # but we use eva_number usually. For MVP we skip complex filtering or rely on join.
-            pass
-
-        # Display Metrics
-        c1, c2, c3 = st.columns(3)
-        n_critical = len(pred_df[pred_df['prediction_proba_class'] == 'CRITICAL'])
-        n_possible = len(pred_df[pred_df['prediction_proba_class'] == 'POSSIBLE'])
-        last_update = pred_df['predicted_at'].max().strftime('%H:%M:%S')
+        html_parts.append(node_html)
         
-        kpi_card("Risque Critique", f"{n_critical} Trains", "⚠️", c1, "critical" if n_critical > 0 else "good")
-        kpi_card("Risque Modéré", f"{n_possible} Trains", "🔸", c2, "warning" if n_possible > 0 else "good")
-        kpi_card("Dernière MAJ", f"{last_update}", "🔄", c3)
-        
-        # Display Table with Color Highlight
-        def color_risk(val):
-            color = 'green'
-            if val == 'CRITICAL': color = 'red'
-            elif val == 'POSSIBLE': color = 'orange'
-            return f'color: {color}; font-weight: bold'
+    html_parts.append('</div>')
+    return "".join(html_parts)
 
-        st.dataframe(
-            pred_df[['station_name', 'train_name', 'train_type', 'is_canceled', 'scheduled_time', 'predicted_delay_min', 'prediction_proba_class']]
-            .style.applymap(color_risk, subset=['prediction_proba_class']),
-            use_container_width=True,
-            column_config={
-                "station_name": "Gare",
-                "train_name": "Train",
-                "train_type": "Type",
-                "is_canceled": "Annulé ?",
-                "scheduled_time": "Heure Prévue",
-                "predicted_delay_min": "Retard Est. (min)",
-                "prediction_proba_class": "Risque"
-            }
-        )
-    else:
-        st.info("Aucune prédiction disponible pour le moment. Le modèle doit être entraîné.")
-
-    # Visualizations
-    st.markdown("---")
-    
-    # Row 1: Delay Distribution & Time Series
-    c1, c2 = st.columns(2)
-    
+# Dialog for Train Details
+@st.dialog("Fahrtdetails", width="large")
+def show_train_details(row):
+    # Header Info
+    c1, c2 = st.columns([2, 1])
     with c1:
-        st.subheader("Distribution des Retards")
-        fig_hist = px.histogram(filtered_df, x="current_delay", nbins=50, 
-                                title="Histogramme des Retards", color_discrete_sequence=['#FF4B4B'])
-        st.plotly_chart(fig_hist, use_container_width=True)
-    
+        st.subheader(f"🚆 {row['train_type']} {row['train_number']}")
+        st.caption(f"Nach {row['train_direction']}")
     with c2:
-        st.subheader("Évolution Temporelle")
-        fig_line = px.scatter(filtered_df, x="scheduled_time", y="current_delay", 
-                              color="train_type", title="Retards par Heure", opacity=0.7)
-        st.plotly_chart(fig_line, use_container_width=True)
-
-    # Row 2: Correlation Matrix (Heatmap)
-    st.subheader("Corrélations Facteurs (Météo vs Retard)")
+        delay = row['predicted_delay_min']
+        if pd.notna(delay):
+            color = "red" if delay > 5 else ("orange" if delay > 2 else "green")
+            st.markdown(f"**Verspätung:** :{color}[{delay:.1f} Min.]")
+        else:
+            st.markdown("**Verspätung:** N/A")
+            
+    st.divider()
     
-    corr_cols = ['current_delay', 'temperature_2m', 'precipitation', 'wind_speed_10m']
-    corr_matrix = filtered_df[corr_cols].corr()
+    # Timeline
+    st.markdown("### 📍 Vollständige Route")
+    st.markdown(render_timeline(row['route_path']), unsafe_allow_html=True)
     
-    fig_corr = px.imshow(corr_matrix, text_auto=True, aspect="auto", color_continuous_scale='RdBu_r',
-                         title="Matrice de Corrélation")
-    st.plotly_chart(fig_corr, use_container_width=True)
+    st.divider()
+    
+    # Additional Details
+    cols = st.columns(3)
+    cols[0].metric("Aktueller Bahnhof", row['station_name'])
+    cols[1].metric("Geplante Zeit", row['scheduled_time'].strftime('%H:%M'))
+    cols[2].metric("Wahrscheinlichkeit", row.get('risk_display', 'N/A'))
 
-    # Raw Data
-    with st.expander("Voir les données brutes"):
-        st.dataframe(filtered_df)
 
-if __name__ == "__main__":
-    main()
+# Sidebar
+st.sidebar.title("🚄 Train_IS")
+st.sidebar.markdown("---")
+
+# Toggle for Historical Data
+show_historical = st.sidebar.checkbox("📜 Vollständigen Verlauf anzeigen", value=False, help="Aktivieren, um alle vergangenen Vorhersagen zu sehen.")
+
+# Refresh Button
+if st.sidebar.button("🔄 Daten aktualisieren"):
+    st.cache_data.clear()
+
+# Main Content
+now = datetime.now(timezone.utc).astimezone(BERLIN_TZ)
+st.title("Prognose-Dashboard")
+
+# Header Info
+st.markdown(f"""
+<div style="display: flex; justify-content: space-between; align_items: center; margin-bottom: 20px; padding: 15px; background-color: #f0f2f6; border-radius: 10px; border-left: 5px solid #ff4b4b;">
+    <div>
+        <h3 style="margin:0; color: #0e1117;">Systemstatus</h3>
+        <p style="margin:0; color: #555;">Letzte Aktualisierung: <strong>{now.strftime('%d.%m.%Y um %H:%M')}</strong></p>
+    </div>
+    <div style="text-align: right;">
+        <p style="margin:0; font-size: 1.1em;">Modus: <strong>{'Verlauf' if show_historical else 'Echtzeit (Zukunft 24h)'}</strong></p>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# Load Data
+df = load_data(historical=show_historical)
+
+if df.empty:
+    st.warning("⚠️ Keine Vorhersagen für den gewählten Zeitraum verfügbar.")
+    st.info("Das System generiert automatisch Vorhersagen. Wenn keine Daten erscheinen, überprüfen Sie, ob die Vorhersage-Pipeline aktiv ist.")
+else:
+    # Preprocessing for visualization
+    df['is_canceled'] = df['is_canceled'].fillna(False).astype(bool)
+    
+    # Translate Risk Levels
+    risk_mapping = {"High": "Hoch", "Medium": "Mittel", "Low": "Niedrig"}
+    if 'prediction_proba_class' in df.columns:
+        df['risk_display'] = df['prediction_proba_class'].map(risk_mapping).fillna(df['prediction_proba_class'])
+    else:
+        df['risk_display'] = "Unbekannt"
+    
+    # Key Metrics as Filters
+    # Calculate counts first
+    total_trains = len(df['train_line_ride_id'].unique())
+    cancelled_trains = len(df[df['is_canceled']]['train_line_ride_id'].unique())
+    
+    # Calculate delay metrics
+    df_active = df[~df['is_canceled']]
+    avg_delay = df_active['predicted_delay_min'].mean() if not df_active.empty else 0.0
+    
+    high_risk_count = len(df[(df['predicted_delay_min'] > 5) & (~df['is_canceled'])])
+    
+    # Next train countdown
+    next_train_time = df[df['scheduled_time'] > now]['scheduled_time'].min()
+    if pd.notnull(next_train_time):
+        delta = next_train_time - now
+        minutes = int(delta.total_seconds() / 60)
+        next_train_label = f"In {minutes} Min."
+    else:
+        next_train_label = "N/A"
+
+    # Define columns for interactive cards
+    col1, col2, col3, col4 = st.columns(4)
+
+    # Helper style for active state
+    def get_button_type(filter_name):
+        return "primary" if st.session_state.active_filter == filter_name else "secondary"
+
+    with col1:
+        # Filter: All (Future)
+        if st.button(
+            f"🚆 Nächste Züge\n{total_trains}", 
+            key="btn_all", 
+            type=get_button_type('all'), 
+            use_container_width=True,
+            help="Alle geplanten Züge anzeigen (Filter zurücksetzen)"
+        ):
+            st.session_state.active_filter = 'all'
+            st.session_state.page_number = 1 # Reset page
+            st.rerun()
+
+    with col2:
+        # Filter: High Risk
+        if st.button(
+            f"⚠️ Hohes Risiko (>5min)\n{high_risk_count}", 
+            key="btn_high_risk", 
+            type=get_button_type('high_risk'), 
+            use_container_width=True,
+            help="Nur Züge mit einer prognostizierten Verspätung > 5 Min. anzeigen"
+        ):
+            st.session_state.active_filter = 'high_risk'
+            st.session_state.page_number = 1 # Reset page
+            st.rerun()
+
+    with col3:
+        # Filter: Canceled
+        if st.button(
+            f"❌ Ausgefallen\n{cancelled_trains}", 
+            key="btn_canceled", 
+            type=get_button_type('canceled'), 
+            use_container_width=True,
+            help="Nur ausgefallene Züge anzeigen"
+        ):
+            st.session_state.active_filter = 'canceled'
+            st.session_state.page_number = 1 # Reset page
+            st.rerun()
+
+    with col4:
+        # Informational Metric (Next Train Countdown) - clicking resets to 'all' or just refreshes
+        if st.button(
+            f"⏱️ Nächster Zug\n{next_train_label}", 
+            key="btn_next", 
+            type="secondary", 
+            use_container_width=True,
+            help="Zeit bis zur nächsten Abfahrt (Klicken, um alle Züge zu sehen)"
+        ):
+            st.session_state.active_filter = 'all'
+            st.session_state.page_number = 1 # Reset page
+            st.rerun()
+
+    # Show active filter message
+    if st.session_state.active_filter != 'all':
+        filter_labels = {
+            'high_risk': "⚠️ Hochrisiko-Züge (> 5 Min.)",
+            'canceled': "❌ Ausgefallene Züge",
+            'delayed': "🐢 Verspätete Züge"
+        }
+        st.info(f"Aktiver Filter: **{filter_labels.get(st.session_state.active_filter, 'Benutzerdefiniert')}** (Klicken Sie auf 'Nächste Züge', um alle zu sehen)")
+
+    # Filters
+    st.markdown("### 🔍 Erweiterte Filter")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        stations = ["Alle"] + list(df['station_name'].unique())
+        selected_station = st.selectbox("Bahnhof", stations)
+    with c2:
+        types = ["Alle"] + list(df['train_type'].unique())
+        selected_type = st.selectbox("Zugtyp", types)
+    with c3:
+        # Pagination Settings
+        rows_per_page = st.selectbox("Zeilen pro Seite", [20, 50, 100], index=0)
+        st.session_state.rows_per_page = rows_per_page
+
+    # Apply Filters
+    df_filtered = df.copy()
+    
+    # 1. Apply Session State Filters (Button Clicks)
+    if st.session_state.active_filter == 'canceled':
+        df_filtered = df_filtered[df_filtered['is_canceled']]
+    elif st.session_state.active_filter == 'high_risk':
+        df_filtered = df_filtered[(df_filtered['predicted_delay_min'] > 5) & (~df_filtered['is_canceled'])]
+    
+    # 2. Apply Dropdown Filters (Refined logic)
+    if selected_station != "Alle":
+        df_filtered = df_filtered[df_filtered['station_name'] == selected_station]
+    if selected_type != "Alle":
+        df_filtered = df_filtered[df_filtered['train_type'] == selected_type]
+
+    # DataFrame with Selection - MOVED UP for immediate visibility
+    st.markdown("### 📋 Liste der gefilterten Züge")
+    st.caption("💡 Klicken Sie auf eine Zeile, um Details zur Fahrt zu sehen.")
+    
+    # Sort by time
+    df_sorted = df_filtered.sort_values("scheduled_time").reset_index(drop=True)
+    
+    # --- Pagination Logic ---
+    total_rows = len(df_sorted)
+    total_pages = math.ceil(total_rows / st.session_state.rows_per_page)
+    
+    # Ensure page number is valid
+    if st.session_state.page_number > total_pages:
+        st.session_state.page_number = max(1, total_pages)
+        
+    start_idx = (st.session_state.page_number - 1) * st.session_state.rows_per_page
+    end_idx = start_idx + st.session_state.rows_per_page
+    
+    # Slice Dataframe for display
+    df_page = df_sorted.iloc[start_idx:end_idx].copy()
+    
+    # Create readable route string for table view (replace | with arrow)
+    if "route_path" in df_page.columns:
+        df_page["route_display"] = df_page["route_path"].astype(str).str.replace("|", " → ")
+    else:
+        df_page["route_display"] = ""
+
+    # Add Status Column for better visibility
+    def get_status(row):
+        if row['is_canceled']:
+            return "❌ Ausgefallen"
+        delay = row['predicted_delay_min']
+        if pd.isna(delay):
+            return "❓ Unbekannt"
+        if delay > 5:
+            return "⚠️ Hohes Risiko"
+        elif delay > 2:
+            return "🐢 Verspätung"
+        else:
+            return "✅ Pünktlich"
+            
+    df_page['status_display'] = df_page.apply(get_status, axis=1)
+
+    # Prepare DataFrame for display (select columns)
+    df_display = df_page[[
+        "scheduled_time", "train_number", "station_name", "train_direction", 
+        "status_display", "predicted_delay_min", "risk_display", 
+        "route_display"
+    ]]
+    
+    # Display Pagination Controls
+    col_p1, col_p2, col_p3, col_p4 = st.columns([1, 1, 3, 1])
+    with col_p1:
+        if st.button("⬅️ Zurück", disabled=(st.session_state.page_number <= 1)):
+            st.session_state.page_number -= 1
+            st.rerun()
+    with col_p2:
+        if st.button("Weiter ➡️", disabled=(st.session_state.page_number >= total_pages)):
+            st.session_state.page_number += 1
+            st.rerun()
+    with col_p3:
+        st.markdown(f"**Seite {st.session_state.page_number} von {total_pages}** ({total_rows} Einträge)")
+    
+    event = st.dataframe(
+        df_display,
+        column_config={
+            "scheduled_time": st.column_config.DatetimeColumn("Zeit", format="HH:mm"),
+            "train_number": "Zug-Nr.",
+            "station_name": "Bahnhof",
+            "train_direction": "Ziel",
+            "status_display": "Status",
+            "predicted_delay_min": st.column_config.NumberColumn("Verspätung (Min.)", format="%.1f"),
+            "risk_display": "Risiko",
+            "route_display": st.column_config.TextColumn("Strecke", help="Vollständige Route", width="large"),
+        },
+        use_container_width=True,
+        hide_index=True,
+        selection_mode="single-row",
+        on_select="rerun"
+    )
+    
+    # Handle Selection
+    if len(event.selection.rows) > 0:
+        selected_index = event.selection.rows[0]
+        # Map selection index back to original dataframe (or page dataframe)
+        selected_row = df_page.iloc[selected_index]
+        show_train_details(selected_row)
+        
+    st.divider()
+
+    # Visualizations - Shown only if relevant (not solely canceled view)
+    if st.session_state.active_filter != 'canceled':
+        st.markdown("### 📊 Risikoanalyse")
+        
+        if df_filtered.empty:
+            st.info("Keine Daten entsprechen den ausgewählten Filtern.")
+        else:
+            # Separate cancelled trains for visualization logic
+            df_active = df_filtered[~df_filtered['is_canceled']]
+            
+            # Scatter Plot: Delay vs Time
+            if not df_active.empty:
+                # Create size reference first to handle negative values
+                df_active['size_ref'] = df_active['predicted_delay_min'].abs().clip(lower=1)
+                
+                fig_scatter = px.scatter(
+                    df_active,
+                    x="scheduled_time",
+                    y="predicted_delay_min",
+                    size="size_ref", 
+                    color="risk_display",
+                    hover_data=["train_number", "station_name", "train_direction", "predicted_delay_min"],
+                    title="Verspätungsprognosen (Aktive Züge)",
+                    labels={"scheduled_time": "Geplante Zeit", "predicted_delay_min": "Geschätzte Verspätung (Min.)", "risk_display": "Risiko"},
+                    color_discrete_map={"Hoch": "red", "Mittel": "orange", "Niedrig": "green"}
+                )
+                # Update size reference scaling
+                max_size = df_active['size_ref'].max() if not df_active.empty else 1
+                fig_scatter.update_traces(marker=dict(sizemode='area', sizeref=2.*max_size/(40.**2), sizemin=4))
+                
+                st.plotly_chart(fig_scatter, use_container_width=True)
+            else:
+                st.info("Alle ausgewählten Züge sind ausgefallen oder haben keine Verspätungsdaten.")
+    
+            # Additional Charts: Heatmap & Pie Chart
+            col_heat, col_pie = st.columns([2, 1])
+            
+            with col_heat:
+                st.markdown("#### 🔥 Durchschnittliche Verspätung nach Stunde und Bahnhof")
+                if not df_active.empty:
+                    # Prepare data for heatmap
+                    df_heat = df_active.copy()
+                    df_heat['hour'] = df_heat['scheduled_time'].dt.hour
+                    # Aggregate average delay
+                    heatmap_data = df_heat.pivot_table(
+                        index='station_name', 
+                        columns='hour', 
+                        values='predicted_delay_min', 
+                        aggfunc='mean'
+                    ).fillna(0)
+                    
+                    if not heatmap_data.empty:
+                        fig_heat = px.imshow(
+                            heatmap_data,
+                            labels=dict(x="Tageszeit", y="Bahnhof", color="Durchschn. Verspätung (Min.)"),
+                            x=heatmap_data.columns,
+                            y=heatmap_data.index,
+                            color_continuous_scale="RdYlGn_r", # Red for high delay, Green for low
+                            aspect="auto"
+                        )
+                        fig_heat.update_xaxes(dtick=1) # Show every hour
+                        st.plotly_chart(fig_heat, use_container_width=True)
+                    else:
+                        st.info("Nicht genügend Daten für die Heatmap.")
+                else:
+                     st.info("Keine aktiven Daten für die Heatmap.")
+    
+    
+            with col_pie:
+                st.markdown("#### 🥧 Risikoverteilung")
+                # Pie Chart
+                pie_data = df_filtered['risk_display'].value_counts().reset_index()
+                pie_data.columns = ['risk_level', 'count']
+                
+                fig_pie = px.pie(
+                    pie_data, 
+                    values='count', 
+                    names='risk_level',
+                    color='risk_level',
+                    color_discrete_map={"Hoch": "red", "Mittel": "orange", "Niedrig": "green"},
+                    hole=0.4
+                )
+                fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig_pie, use_container_width=True)

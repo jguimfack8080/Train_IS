@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import pendulum
+from datetime import datetime
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 
@@ -31,6 +32,9 @@ def run_plan_window(**context):
     logical_date = context["logical_date"]
     berlin_dt = to_tz(logical_date)
 
+    # Use one batch_id for all hours to ensure transform task picks up everything
+    batch_id = f"PLAN_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+
     rows_total = 0
     api_success_total = 0
     stations_count = None
@@ -38,7 +42,7 @@ def run_plan_window(**context):
     # Heures du jour courant (00–23)
     for hour in range(0, 24):
         dt_hour = berlin_dt.replace(hour=hour, minute=0, second=0, microsecond=0)
-        metrics = ingest_plan(dt_hour)
+        metrics = ingest_plan(dt_hour, batch_id=batch_id)
         if not isinstance(metrics, dict):
             metrics = {}
         rows_total += (metrics.get("rows_inserted") or 0)
@@ -49,7 +53,7 @@ def run_plan_window(**context):
     next_day = berlin_dt.add(days=1)
     for hour in range(0, 6):
         dt_hour = next_day.replace(hour=hour, minute=0, second=0, microsecond=0)
-        metrics = ingest_plan(dt_hour)
+        metrics = ingest_plan(dt_hour, batch_id=batch_id)
         if not isinstance(metrics, dict):
             metrics = {}
         rows_total += (metrics.get("rows_inserted") or 0)
