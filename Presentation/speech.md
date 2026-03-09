@@ -117,6 +117,7 @@ Schauen Sie auf den Ablauf:
 1.  **Ingestion (Staging):** Zuerst holen wir die Daten rein. Wir speichern sie "as is" – also genau so, wie sie kommen. Das ist wichtig für die Beweissicherheit und Geschwindigkeit.
 2.  **Historisierung (PSA):** Dann archivieren wir alles in der "Persistent Staging Area". Das ist unser goldenes Archiv. Selbst wenn wir später Fehler machen, die Originaldaten sind sicher.
 3.  **Veredelung (DWH):** Erst im Data Warehouse wandeln wir das kryptische XML in lesbare Tabellen um. Hier entsteht der eigentliche Wert. Aus technischen Kürzeln werden verständliche Informationen.
+4.  **Analytics (ML & Visualization):** Und schließlich füttern wir diese sauberen Daten in unser ML-Modell und visualisieren die Ergebnisse. Hier wird aus Rohdaten echtes, nutzbares Wissen für den Endanwender.
 
 ---
 

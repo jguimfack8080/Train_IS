@@ -44,12 +44,13 @@ def load_data(historical=False):
     engine = get_db_engine()
     
     if historical:
-        # Load all data with pagination if needed (here limit 50000 for performance)
-        time_filter = ""
-        limit = "LIMIT 50000"
+        # Load last 7 days for historical analysis
+        time_filter = "WHERE p.scheduled_time >= NOW() - INTERVAL '7 DAYS'"
+        limit = ""
     else:
-        # Load NOW - 1h to NOW + 24h (Optimized window)
-        time_filter = "WHERE p.scheduled_time >= NOW() - INTERVAL '1 HOUR' AND p.scheduled_time <= NOW() + INTERVAL '24 HOURS'"
+        # Load NOW to NOW + 24h (Real-time window)
+        # User requested starting exactly from current time
+        time_filter = "WHERE p.scheduled_time >= NOW() AND p.scheduled_time <= NOW() + INTERVAL '24 HOURS'"
         limit = ""
 
     query = f"""
@@ -72,9 +73,10 @@ def load_data(historical=False):
             train_line_ride_id,
             train_number,
             train_line_name as train_line,
-            train_type,
+            train_category as train_type,
             train_direction,
             route_path,
+            platform as scheduled_platform,
             -- Pre-calculate parsed direction from route_path (last element)
             split_part(route_path, '|', array_length(string_to_array(route_path, '|'), 1)) as parsed_direction
         FROM dwh.timetables_plan_events
@@ -87,6 +89,14 @@ def load_data(historical=False):
             delay_in_min
         FROM dwh.timetables_fchg_events
         ORDER BY train_line_ride_id, event_time DESC
+    ),
+    train_changes AS (
+        SELECT DISTINCT ON (event_id)
+            event_id as train_line_ride_id,
+            platform as changed_platform,
+            platform_change
+        FROM dwh.timetables_rchg_events
+        ORDER BY event_id, timestamp_event DESC
     )
     SELECT 
         pd.*,
@@ -101,11 +111,19 @@ def load_data(historical=False):
             'Unbekanntes Ziel'
         ) as train_direction,
         ti.route_path,
+        ti.scheduled_platform,
+        tc.changed_platform,
+        COALESCE(tc.changed_platform, ti.scheduled_platform) as current_platform,
+        CASE 
+            WHEN tc.changed_platform IS NOT NULL AND tc.changed_platform != ti.scheduled_platform THEN TRUE 
+            ELSE FALSE 
+        END as is_platform_changed,
         COALESCE(ts.is_canceled, FALSE) as is_canceled,
         ts.delay_in_min as current_delay
     FROM predictions_data pd
     LEFT JOIN train_info ti ON pd.train_line_ride_id = ti.train_line_ride_id
     LEFT JOIN train_status ts ON pd.train_line_ride_id = ts.train_line_ride_id
+    LEFT JOIN train_changes tc ON pd.train_line_ride_id = tc.train_line_ride_id
     """
     
     try:
@@ -190,6 +208,17 @@ def show_train_details(row):
     with c1:
         st.subheader(f"🚆 {row['train_type']} {row['train_number']}")
         st.caption(f"Nach {row['train_direction']}")
+        
+        # Platform Info
+        platform = row.get('current_platform')
+        if pd.isna(platform):
+            platform = "Unbekannt"
+        
+        if row.get('is_platform_changed', False):
+            st.warning(f"⚠️ Gleisänderung: Geplant {row.get('scheduled_platform', '?')} → Aktuell {platform}")
+        else:
+            st.markdown(f"**Gleis:** {platform}")
+            
     with c2:
         delay = row['predicted_delay_min']
         if pd.notna(delay):
@@ -250,6 +279,15 @@ if df.empty:
 else:
     # Preprocessing for visualization
     df['is_canceled'] = df['is_canceled'].fillna(False).astype(bool)
+    
+    # Check for platform changes and notify
+    if 'is_platform_changed' in df.columns:
+        df['is_platform_changed'] = df['is_platform_changed'].fillna(False).astype(bool)
+        changed_trains = df[df['is_platform_changed']]
+        if not changed_trains.empty:
+            count = len(changed_trains)
+            msg = f"⚠️ Gleisänderung für {count} Zug/Züge erkannt!"
+            st.toast(msg, icon="📢")
     
     # Translate Risk Levels
     risk_mapping = {"High": "Hoch", "Medium": "Mittel", "Low": "Niedrig"}
@@ -357,8 +395,13 @@ else:
         selected_type = st.selectbox("Zugtyp", types)
     with c3:
         # Pagination Settings
-        rows_per_page = st.selectbox("Zeilen pro Seite", [20, 50, 100], index=0)
-        st.session_state.rows_per_page = rows_per_page
+        rows_selection = st.selectbox("Zeilen pro Seite", [20, 50, 100, "Alle"], index=0)
+        
+        if rows_selection == "Alle":
+             # Use a large number to effectively show all rows
+             st.session_state.rows_per_page = 1000000 
+        else:
+             st.session_state.rows_per_page = rows_selection
 
     # Apply Filters
     df_filtered = df.copy()
@@ -420,7 +463,7 @@ else:
 
     # Prepare DataFrame for display (select columns)
     df_display = df_page[[
-        "scheduled_time", "train_number", "station_name", "train_direction", 
+        "scheduled_time", "train_number", "train_type", "station_name", "train_direction", "current_platform",
         "status_display", "predicted_delay_min", "risk_display", 
         "route_display"
     ]]
@@ -443,8 +486,10 @@ else:
         column_config={
             "scheduled_time": st.column_config.DatetimeColumn("Zeit", format="HH:mm"),
             "train_number": "Zug-Nr.",
+            "train_type": "Typ",
             "station_name": "Bahnhof",
             "train_direction": "Ziel",
+            "current_platform": st.column_config.TextColumn("Gleis"),
             "status_display": "Status",
             "predicted_delay_min": st.column_config.NumberColumn("Verspätung (Min.)", format="%.1f"),
             "risk_display": "Risiko",
@@ -473,7 +518,7 @@ else:
             st.info("Keine Daten entsprechen den ausgewählten Filtern.")
         else:
             # Separate cancelled trains for visualization logic
-            df_active = df_filtered[~df_filtered['is_canceled']]
+            df_active = df_filtered[~df_filtered['is_canceled']].copy()
             
             # Scatter Plot: Delay vs Time
             if not df_active.empty:
@@ -496,56 +541,60 @@ else:
                 fig_scatter.update_traces(marker=dict(sizemode='area', sizeref=2.*max_size/(40.**2), sizemin=4))
                 
                 st.plotly_chart(fig_scatter, use_container_width=True)
-            else:
-                st.info("Alle ausgewählten Züge sind ausgefallen oder haben keine Verspätungsdaten.")
-    
-            # Additional Charts: Heatmap & Pie Chart
-            col_heat, col_pie = st.columns([2, 1])
-            
-            with col_heat:
-                st.markdown("#### 🔥 Durchschnittliche Verspätung nach Stunde und Bahnhof")
-                if not df_active.empty:
-                    # Prepare data for heatmap
-                    df_heat = df_active.copy()
-                    df_heat['hour'] = df_heat['scheduled_time'].dt.hour
-                    # Aggregate average delay
-                    heatmap_data = df_heat.pivot_table(
-                        index='station_name', 
-                        columns='hour', 
-                        values='predicted_delay_min', 
-                        aggfunc='mean'
-                    ).fillna(0)
-                    
-                    if not heatmap_data.empty:
-                        fig_heat = px.imshow(
-                            heatmap_data,
-                            labels=dict(x="Tageszeit", y="Bahnhof", color="Durchschn. Verspätung (Min.)"),
-                            x=heatmap_data.columns,
-                            y=heatmap_data.index,
-                            color_continuous_scale="RdYlGn_r", # Red for high delay, Green for low
-                            aspect="auto"
-                        )
-                        fig_heat.update_xaxes(dtick=1) # Show every hour
-                        st.plotly_chart(fig_heat, use_container_width=True)
-                    else:
-                        st.info("Nicht genügend Daten für die Heatmap.")
-                else:
-                     st.info("Keine aktiven Daten für die Heatmap.")
-    
-    
-            with col_pie:
-                st.markdown("#### 🥧 Risikoverteilung")
-                # Pie Chart
-                pie_data = df_filtered['risk_display'].value_counts().reset_index()
-                pie_data.columns = ['risk_level', 'count']
+
+                # --- Additional Visualizations (Heatmap & Pie Chart) ---
+                st.markdown("### 📈 Detailanalysen")
                 
+                # Pie Chart: Risk Distribution (Full Width or smaller, but separate from Heatmap)
+                risk_counts = df_active['risk_display'].value_counts().reset_index()
+                risk_counts.columns = ['risk_display', 'count']
+                
+                # Enhanced Pie Chart (Donut style)
                 fig_pie = px.pie(
-                    pie_data, 
+                    risk_counts, 
                     values='count', 
-                    names='risk_level',
-                    color='risk_level',
-                    color_discrete_map={"Hoch": "red", "Mittel": "orange", "Niedrig": "green"},
+                    names='risk_display', 
+                    title='Verteilung der Risikoklassen',
+                    color='risk_display',
+                    color_discrete_map={"Hoch": "#DC3545", "Mittel": "#FFC107", "Niedrig": "#28A745"},
                     hole=0.4
                 )
                 fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+                fig_pie.update_layout(showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5))
                 st.plotly_chart(fig_pie, use_container_width=True)
+                
+                st.divider()
+
+                # Heatmap: Delay by Hour and Station (Full Width at the bottom)
+                # Extract hour from scheduled_time if not already present
+                df_active['hour'] = df_active['scheduled_time'].dt.hour
+                
+                # Pivot table for Heatmap
+                heatmap_data = df_active.pivot_table(
+                    index='station_name', 
+                    columns='hour', 
+                    values='predicted_delay_min', 
+                    aggfunc='mean'
+                ).fillna(0)
+                
+                if not heatmap_data.empty:
+                    # Enhanced Heatmap
+                    fig_heatmap = px.imshow(
+                        heatmap_data,
+                        labels=dict(x="Uhrzeit (Stunde)", y="Station", color="Verspätung (Min)"),
+                        x=heatmap_data.columns,
+                        y=heatmap_data.index,
+                        title="Heatmap: Verspätung nach Station & Zeit",
+                        color_continuous_scale="RdYlGn_r",
+                        aspect="auto",
+                        text_auto=".1f"
+                    )
+                    fig_heatmap.update_xaxes(side="bottom")
+                    # Make the heatmap taller to be more visible as requested
+                    fig_heatmap.update_layout(height=600)
+                    st.plotly_chart(fig_heatmap, use_container_width=True)
+                else:
+                    st.info("Nicht genügend Daten für die Heatmap.")
+
+            else:
+                st.info("Keine aktiven (nicht stornierten) Züge für die Visualisierung.")

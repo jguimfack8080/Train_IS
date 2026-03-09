@@ -1057,6 +1057,45 @@
                 height: 48px;
             }
         }
+        /* Responsive Scaling Fix */
+        .slide {
+            padding: 0 !important;
+            overflow: hidden !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+        }
+        
+        .slide-scaler {
+            width: 1600px;
+            height: auto;
+            min-height: 900px;
+            display: flex;
+            flex-direction: column;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            padding: 4rem 6rem;
+            box-sizing: border-box;
+            transform-origin: center center;
+        }
+        
+        .slide-content {
+            width: 100% !important;
+            height: auto !important;
+            min-height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center; /* Center content vertically if space permits */
+            max-width: none !important;
+        }
+
+        @media (max-width: 768px) {
+            .slide-scaler {
+                padding: 2rem;
+            }
+        }
     </style>
 </head>
 <body>
@@ -1511,7 +1550,7 @@
                     <div class="flow-step">
                         <div class="flow-icon">🎯</div>
                         <div class="flow-title">Analytics</div>
-                        <div class="flow-desc">ML & Views</div>
+                        <div class="flow-desc">ML & Visualization</div>
                         <p class="card-text" style="margin-top: 1rem; font-size: 0.95rem;">Hier entsteht der geschäftliche Mehrwert.</p>
                     </div>
                 </div>
@@ -1801,6 +1840,7 @@
         </div>
         <div class="dot-indicators" id="dotIndicators"></div>
         <button class="nav-btn" id="nextBtn" aria-label="Nächste Folie">→</button>
+        <button class="nav-btn" id="fullscreenBtn" aria-label="Vollbild" style="margin-left: 1rem; font-size: 1.2rem;" title="Vollbild (F)">⛶</button>
     </div>
 
     <script>
@@ -1871,6 +1911,21 @@
         // Event listeners
         document.getElementById('nextBtn').addEventListener('click', nextSlide);
         document.getElementById('prevBtn').addEventListener('click', prevSlide);
+        
+        // Fullscreen Logic
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen().catch(err => {
+                    console.log(`Error attempting to enable full-screen mode: ${err.message} (${err.name})`);
+                });
+            } else {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                }
+            }
+        }
+        
+        document.getElementById('fullscreenBtn').addEventListener('click', toggleFullscreen);
 
         // Keyboard navigation
         document.addEventListener('keydown', (e) => {
@@ -1886,6 +1941,9 @@
             } else if (e.key === 'End') {
                 e.preventDefault();
                 goToSlide(totalSlides - 1);
+            } else if (e.key.toLowerCase() === 'f') {
+                e.preventDefault();
+                toggleFullscreen();
             }
         });
 
@@ -1927,6 +1985,63 @@
 
         // Initialize first slide
         updateSlides();
+
+        // Responsive Scaling Logic
+        function initResponsiveScaling() {
+            const slides = document.querySelectorAll('.slide');
+            const baseWidth = 1600;
+
+            // Wrap content in scaler if not present
+            slides.forEach(slide => {
+                if (!slide.querySelector('.slide-scaler')) {
+                    const content = slide.querySelector('.slide-content');
+                    if (content) {
+                        const scaler = document.createElement('div');
+                        scaler.className = 'slide-scaler';
+                        // Move content into scaler
+                        scaler.appendChild(content);
+                        slide.appendChild(scaler);
+                    }
+                }
+            });
+
+            function resize() {
+                const windowWidth = window.innerWidth;
+                const windowHeight = window.innerHeight;
+                
+                document.querySelectorAll('.slide-scaler').forEach(scaler => {
+                    // Measure actual height of content (min 900px from CSS)
+                    // We must ensure the element is rendered to get height
+                    const contentHeight = Math.max(scaler.offsetHeight, 900);
+                    
+                    // Calculate scale to fit this specific slide
+                    const scaleX = windowWidth / baseWidth;
+                    const scaleY = windowHeight / contentHeight;
+                    
+                    // Scale to fit whichever dimension is the bottleneck
+                    const scale = Math.min(scaleX, scaleY);
+                    
+                    // Combine centering translate with scale
+                    scaler.style.transform = `translate(-50%, -50%) scale(${scale})`;
+                });
+            }
+
+            window.addEventListener('resize', resize);
+            window.addEventListener('load', resize); // Ensure images are loaded
+            // Initial call
+            resize();
+            
+            // Also update on slide change just in case
+            const originalUpdateSlides = window.updateSlides;
+            window.updateSlides = function() {
+                if(originalUpdateSlides) originalUpdateSlides();
+                // Short timeout to allow any layout shifts
+                setTimeout(resize, 50);
+            };
+        }
+        
+        // Run scaling initialization
+        initResponsiveScaling();
 
         // Auto-advance (optional - can be disabled)
         // Uncomment the following lines if you want auto-advance after 30 seconds
